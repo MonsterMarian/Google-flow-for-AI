@@ -17,7 +17,7 @@ Rozšíření běží **uvnitř stránky Flow**, takže používá tvoje přihl�
 3. Klikni **Načíst nerozbalené** a vyber složku:
 
 ```
-C:\Users\mvystavel\Grav-Projekty\Google flow\extension
+/cesta/k/tomuto/repu/Google-flow-for-AI/extension
 ```
 
 Hotovo. Otevři <https://labs.google/fx/tools/flow>, jdi do projektu
@@ -114,7 +114,7 @@ složce spustíš relaci. Pro jiného klienta zaregistruj:
 ```json
 {
   "command": "python",
-  "args": ["C:\\Users\\mvystavel\\Grav-Projekty\\Google flow\\mcp_launch.py"]
+  "args": ["mcp_launch.py"]
 }
 ```
 

@@ -14,7 +14,7 @@ from typing import Any
 try:  # MCP SDK 2.x
     from mcp.server.mcpserver import MCPServer as _Server
 except ImportError:  # starsi SDK 1.x
-    from mcp.server.fastmcp import FastMCP as _Server  # type: ignore[assignment]
+    from mcp.server.fastmcp import FastMCP as _Server  # type: ignore[attr-defined,no-redef,assignment]
 
 from . import db
 from .config import CFG

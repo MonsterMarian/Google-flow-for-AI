@@ -11,7 +11,7 @@ credits:
   max_per_job: 60
   reset_day: 1
 paths:
-  outputs: C:\Users\mvystavel\OneDrive - Elektroline\Plocha\FlowBridge
+  outputs: outputs
   db: flowbridge.db
 server:
   host: 127.0.0.1
