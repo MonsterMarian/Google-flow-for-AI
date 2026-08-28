@@ -27,7 +27,7 @@
       waitTimeoutSeconds: 900,
       maxCreditsPerJob: 60,
       bridgeUrl: "http://127.0.0.1:8765",
-      bridgeEnabled: false,
+      bridgeEnabled: true,
       collapsed: false,
       projectUrl: "",
     },
@@ -67,6 +67,19 @@
     if (state.log.length > 120) state.log.length = 120;
     save();
     renderLog();
+    // Kdyz bezi mustek, posilame log i tam - jinak neni z venku videt,
+    // co se v prohlizeci deje.
+    if (state.settings.bridgeEnabled) {
+      try {
+        chrome.runtime.sendMessage({
+          type: "bridgeLog",
+          url: state.settings.bridgeUrl,
+          payload: { message: String(msg), level },
+        });
+      } catch {
+        /* na logovani nikdy nepadame */
+      }
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -549,12 +562,33 @@
 
   /* Bez otevreneho projektu neni kam psat prompt. Kdyz si projekt pamatujeme,
      prejdeme do nej sami - jinak by beh bez dozoru skoncil hned na zacatku. */
+  let pokusuOZotaveni = 0;
+
+  /* Flow po prime navigaci na URL projektu obcas spadne na "Application error".
+     Stranka se nacte, ale ovladaci pruh chybi. Pomuze obnoveni. */
+  function strankaSpadla() {
+    return /Application error|client-side exception/i.test(document.body.innerText || "");
+  }
+
   function zajistiProjekt() {
     if (naProjektu()) {
       if (state.settings.projectUrl !== location.href) {
         state.settings.projectUrl = location.href;
         save();
       }
+      if (!editor()) {
+        if (pokusuOZotaveni < 3) {
+          pokusuOZotaveni++;
+          log(strankaSpadla()
+            ? `Flow spadl na chybě, obnovuji stránku (${pokusuOZotaveni}/3)`
+            : `ovládací pruh ještě není, obnovuji stránku (${pokusuOZotaveni}/3)`, "warn");
+          setTimeout(() => location.reload(), 1500);
+        } else {
+          log("Flow se nepodařilo rozběhnout ani po třech obnoveních", "error");
+        }
+        return false;
+      }
+      pokusuOZotaveni = 0;
       return true;
     }
     if (state.settings.projectUrl) {

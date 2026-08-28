@@ -179,6 +179,8 @@ nefunguje a nejsou nikde zdokumentované:
 | **Spojení na localhost** | CSP stránky Google ho **zakazuje**. Stránka nemůže poslat data na `127.0.0.1`; musí přes rozšíření. |
 | **Hromadné stahování** | Chrome ho stránce po pár souborech zablokuje. `chrome.downloads` z rozšíření tomu nepodléhá — proto ta cesta. |
 | **Tempo** | Při rychlém sypání dávek Flow jednu generaci odmítl s „We noticed unusual activity". Drž pauzy mezi odesláními. |
+| **Přímý odkaz na projekt** | Když Chrome nastartuje rovnou na `…/project/<id>`, Flow často spadne na „Application error" — stránka se načte, ale ovládací pruh chybí. Rozšíření to pozná a stránku obnoví (až 3×). |
+| **Ladicí kanál** | Na jednu kartu pustí Chrome jen jednoho ladicího klienta. Když je připojený jiný nástroj (otevřené DevTools), `chrome.debugger.attach` se nevrátí vůbec — odesílání proto má časový limit a napíše to do logu. |
 
 ### Zásadní omezení
 

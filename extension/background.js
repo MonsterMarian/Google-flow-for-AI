@@ -193,6 +193,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  if (msg?.type === "bridgeLog") {
+    bridgePost(msg.url, "/ext/log", msg.payload || {}).then(sendResponse);
+    return true;
+  }
+
   if (msg?.type === "bridgeBeat") {
     bridgePost(msg.url, "/ext/heartbeat", msg.payload || {}).then(sendResponse);
     return true;

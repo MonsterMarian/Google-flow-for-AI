@@ -265,6 +265,19 @@ async def ext_upload(request: Request, tag: str = "default", name: str = "soubor
     return {"ok": True, "path": str(dest), "bytes": len(data)}
 
 
+class ExtLog(BaseModel):
+    message: str
+    level: str = "info"
+
+
+@app.post("/ext/log")
+def ext_log(body: ExtLog) -> dict[str, Any]:
+    """Prevezme radek z logu rozsireni, at je videt i mimo prohlizec."""
+    db.init()
+    db.log(f"[rozšíření] {body.message[:300]}", level=body.level)
+    return {"ok": True}
+
+
 @app.post("/ext/heartbeat")
 async def ext_heartbeat(request: Request) -> dict[str, Any]:
     """Rozsireni se hlasi kazdych ~10 s a rovnou rekne, co prave dela."""
