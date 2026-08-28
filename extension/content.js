@@ -562,35 +562,48 @@
 
   /* Bez otevreneho projektu neni kam psat prompt. Kdyz si projekt pamatujeme,
      prejdeme do nej sami - jinak by beh bez dozoru skoncil hned na zacatku. */
-  let pokusuOZotaveni = 0;
-
   /* Flow po prime navigaci na URL projektu obcas spadne na "Application error".
      Stranka se nacte, ale ovladaci pruh chybi. Pomuze obnoveni. */
   function strankaSpadla() {
     return /Application error|client-side exception/i.test(document.body.innerText || "");
   }
 
-  function zajistiProjekt() {
+  /* Pocitadlo obnoveni musi prezit reload, takze zije ve stavu, ne v promenne. */
+  async function zajistiProjekt() {
     if (naProjektu()) {
       if (state.settings.projectUrl !== location.href) {
         state.settings.projectUrl = location.href;
         save();
       }
-      if (!editor()) {
-        if (pokusuOZotaveni < 3) {
-          pokusuOZotaveni++;
-          log(strankaSpadla()
-            ? `Flow spadl na chybě, obnovuji stránku (${pokusuOZotaveni}/3)`
-            : `ovládací pruh ještě není, obnovuji stránku (${pokusuOZotaveni}/3)`, "warn");
-          setTimeout(() => location.reload(), 1500);
-        } else {
-          log("Flow se nepodařilo rozběhnout ani po třech obnoveních", "error");
+
+      // Flow vykresluje ovladaci pruh az par vterin po nacteni - pockame si.
+      for (let i = 0; i < 30; i++) {
+        if (editor()) {
+          if (state.recovery) {
+            state.recovery = 0;
+            save();
+          }
+          return true;
         }
-        return false;
+        if (i === 0 && strankaSpadla()) break;  // spadlou stranku nema smysl cekat
+        await sleep(1000);
       }
-      pokusuOZotaveni = 0;
-      return true;
+
+      state.recovery = (state.recovery || 0) + 1;
+      save();
+      if (state.recovery <= 3) {
+        log(`Flow nenaběhl${strankaSpadla() ? " (spadl na chybě)" : ""}, `
+          + `obnovuji stránku (${state.recovery}/3)`, "warn");
+        setTimeout(() => location.reload(), 2000);
+      } else {
+        log("Flow se nepodařilo rozběhnout ani po třech obnoveních - zastavuji", "error");
+        state.running = false;
+        save();
+        render();
+      }
+      return false;
     }
+
     if (state.settings.projectUrl) {
       log("nejsem v projektu, přecházím do zapamatovaného");
       location.href = state.settings.projectUrl;
@@ -605,7 +618,7 @@
     busy = true;
     try {
       while (state.running) {
-        if (!zajistiProjekt()) {
+        if (!(await zajistiProjekt())) {
           await sleep(8000);
           continue;
         }
