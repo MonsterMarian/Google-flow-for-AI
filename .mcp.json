@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "flowbridge": {
+      "command": "python",
+      "args": ["C:\\Users\\mvystavel\\Grav-Projekty\\Google flow\\mcp_launch.py"]
+    }
+  }
+}

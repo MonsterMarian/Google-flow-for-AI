@@ -1,0 +1,18 @@
+# FlowBridge - konfigurace mustku pro AI agenty.
+# Generovani ridi rozsireni v Chrome; jeho nastaveni je v extension/content.js.
+
+limits:
+  max_images_per_batch: 4
+  max_concurrent_batches: 3
+  min_seconds_between_submits: 8
+credits:
+  monthly_budget: 1050
+  reserve: 50
+  max_per_job: 60
+  reset_day: 1
+paths:
+  outputs: C:\Users\mvystavel\OneDrive - Elektroline\Plocha\FlowBridge
+  db: flowbridge.db
+server:
+  host: 127.0.0.1
+  port: 8765

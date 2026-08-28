@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+flowbridge.db
+flowbridge.db-wal
+flowbridge.db-shm
+outputs/
+jobs-logo.json

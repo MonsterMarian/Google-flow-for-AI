@@ -1,0 +1,92 @@
+#flowbridge-panel {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  width: 340px;
+  max-height: calc(100vh - 120px);
+  display: flex;
+  flex-direction: column;
+  background: #16161a;
+  color: #e8e8ea;
+  border: 1px solid #2c2c33;
+  border-radius: 12px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, .55);
+  font: 13px/1.45 "Google Sans Text", "Segoe UI", system-ui, sans-serif;
+  z-index: 2147483000;
+  overflow: hidden;
+}
+
+#flowbridge-panel.fb-collapsed { height: auto; max-height: none; }
+#flowbridge-panel.fb-collapsed .fb-body { display: none; }
+
+#flowbridge-panel .fb-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 12px; border-bottom: 1px solid #2c2c33;
+  cursor: move; user-select: none; background: #1c1c21;
+}
+#flowbridge-panel .fb-title { font-weight: 600; letter-spacing: .3px; flex: 1; }
+#flowbridge-panel .fb-dot {
+  width: 8px; height: 8px; border-radius: 50%; background: #5a5a63; flex: none;
+}
+#flowbridge-panel .fb-dot.on { background: #4ade80; box-shadow: 0 0 8px #4ade80; }
+#flowbridge-panel .fb-dot.busy { background: #60a5fa; box-shadow: 0 0 8px #60a5fa; }
+
+#flowbridge-panel .fb-body { overflow-y: auto; padding: 12px; }
+
+#flowbridge-panel label {
+  display: block; font-size: 10.5px; text-transform: uppercase;
+  letter-spacing: .6px; color: #8b8b93; margin: 10px 0 4px;
+}
+#flowbridge-panel textarea,
+#flowbridge-panel input,
+#flowbridge-panel select {
+  width: 100%; background: #0e0e11; color: #e8e8ea;
+  border: 1px solid #2c2c33; border-radius: 7px; padding: 7px 9px;
+  font: inherit; box-sizing: border-box;
+}
+#flowbridge-panel textarea { resize: vertical; min-height: 66px; }
+#flowbridge-panel .fb-row { display: flex; gap: 7px; }
+#flowbridge-panel .fb-row > * { flex: 1; min-width: 0; }
+
+#flowbridge-panel button {
+  background: #a78bfa; color: #14141c; border: 0; border-radius: 7px;
+  padding: 8px 12px; font: inherit; font-weight: 600; cursor: pointer;
+}
+#flowbridge-panel button:hover { filter: brightness(1.12); }
+#flowbridge-panel button.fb-ghost {
+  background: transparent; color: #a0a0a8; border: 1px solid #2c2c33; font-weight: 400;
+}
+#flowbridge-panel button.fb-x {
+  background: transparent; color: #7a7a82; border: 0; padding: 2px 6px;
+  font-size: 15px; font-weight: 400; line-height: 1;
+}
+
+#flowbridge-panel .fb-job {
+  border: 1px solid #2c2c33; border-radius: 8px; padding: 7px 9px; margin-top: 7px;
+  background: #121215;
+}
+#flowbridge-panel .fb-job-top { display: flex; align-items: center; gap: 6px; }
+#flowbridge-panel .fb-badge {
+  font-size: 10px; padding: 1px 7px; border-radius: 999px;
+  border: 1px solid currentColor; flex: none;
+}
+#flowbridge-panel .fb-badge.queued { color: #8b8b93; }
+#flowbridge-panel .fb-badge.running { color: #60a5fa; }
+#flowbridge-panel .fb-badge.done { color: #4ade80; }
+#flowbridge-panel .fb-badge.failed { color: #f87171; }
+#flowbridge-panel .fb-prompt {
+  flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 12px; color: #cfcfd4;
+}
+#flowbridge-panel .fb-meta { font-size: 10.5px; color: #7a7a82; margin-top: 3px; }
+#flowbridge-panel .fb-err { font-size: 10.5px; color: #f87171; margin-top: 3px; }
+
+#flowbridge-panel .fb-log {
+  margin-top: 12px; border-top: 1px solid #2c2c33; padding-top: 8px;
+  font-size: 10.5px; color: #7a7a82; max-height: 130px; overflow-y: auto;
+}
+#flowbridge-panel .fb-log div { padding: 1px 0; }
+#flowbridge-panel .fb-log .warn { color: #fbbf24; }
+#flowbridge-panel .fb-log .error { color: #f87171; }
+
+#flowbridge-panel .fb-hint { font-size: 10.5px; color: #7a7a82; margin-top: 6px; }

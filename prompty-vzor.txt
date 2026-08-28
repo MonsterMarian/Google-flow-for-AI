@@ -1,0 +1,14 @@
+# Vzorový soubor promptů pro FlowBridge.
+# Jeden prompt na řádek. Prázdné řádky a řádky začínající # se přeskočí.
+#
+# Použití:
+#   python -m flowbridge addfile prompty-vzor.txt --per-prompt 20 --aspect 1:1 --tag kampan
+#
+# --per-prompt 20 udělá z každého řádku 20 kusů; rozdělí se to samo na úlohy
+# po dvanácti. 50 řádků x 20 = 1000 kusů.
+
+Flat vector app icon, monogram of a lowercase letter p fused with an eighth music note, warm amber gold on pure black, thick rounded strokes, subtle 3D extrusion, no text
+Minimal music player icon, one continuous amber stroke forming a note stem with flag and a rounded bowl, deep black background, soft extruded shadow, no text
+Abstract brand mark, golden amber soundwave curling into a letter form, matte black backdrop, uniform stroke weight, subtle bevel catching warm light, no text
+Glossy 3D trophy icon with a bold checkmark rising from the cup, cyan to orange gradient, mint accents, beveled facets, white background, no text
+Vibrant 3D achievement badge, faceted ribbon and star with a checkmark, cyan to orange gradient, glossy plastic, soft studio light, white background, no text
