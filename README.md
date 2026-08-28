@@ -182,6 +182,20 @@ nefunguje a nejsou nikde zdokumentované:
 | **Přímý odkaz na projekt** | Když Chrome nastartuje rovnou na `…/project/<id>`, Flow často spadne na „Application error" — stránka se načte, ale ovládací pruh chybí. Rozšíření to pozná a stránku obnoví (až 3×). |
 | **Ladicí kanál** | Na jednu kartu pustí Chrome jen jednoho ladicího klienta. Když je připojený jiný nástroj (otevřené DevTools), `chrome.debugger.attach` se nevrátí vůbec — odesílání proto má časový limit a napíše to do logu. |
 
+### Jednorázový krok, který za tebe nikdo neudělá
+
+Rozšíření potřebuje oprávnění **`debugger`** (jinak neodešle — viz níže).
+Chrome u takového oprávnění vždycky čeká na potvrzení od člověka:
+
+1. otevři `chrome://extensions`
+2. na kartě **FlowBridge** klikni na **↻** (znovu načíst) a nech ho **zapnuté**
+
+Je to bezpečnostní hranice prohlížeče — nedá se obejít skriptem ani jiným
+rozšířením. Po tomhle jednom kliknutí už FlowBridge jede bez dozoru.
+
+Poznáš to podle lišty **„FlowBridge ladí tento prohlížeč"** nad stránkou.
+Ta lišta musí zůstat; když ji zavřeš, odesílání přestane fungovat.
+
 ### Zásadní omezení
 
 **Rozšíření samo neumí zmáčknout odeslat.** Content script produkuje netrusted

@@ -1,9 +1,14 @@
 {
   "manifest_version": 3,
   "name": "FlowBridge",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Fronta promptů pro Google Flow - dávkuje generování a stahuje výsledky.",
-  "permissions": ["storage", "downloads", "scripting", "debugger"],
+  "permissions": [
+    "storage",
+    "downloads",
+    "scripting",
+    "debugger"
+  ],
   "host_permissions": [
     "https://labs.google/*",
     "http://127.0.0.1/*",
@@ -14,9 +19,15 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://labs.google/fx/tools/flow*"],
-      "js": ["content.js"],
-      "css": ["panel.css"],
+      "matches": [
+        "https://labs.google/fx/tools/flow*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "css": [
+        "panel.css"
+      ],
       "run_at": "document_idle"
     }
   ],
