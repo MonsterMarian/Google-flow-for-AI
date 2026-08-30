@@ -246,8 +246,20 @@ def _relocate(paths: list[str], job_id: str) -> list[str]:
         try:
             shutil.move(str(src), str(dest))
             moved.append(str(dest))
+            
+            # Uklid prazdnych slozek ve stazenych souborech (az po FlowBridge)
+            p = src.parent
+            while True:
+                try:
+                    p.rmdir()
+                except OSError:
+                    break # neni prazdna nebo neni pristup
+                if p.name.lower() == "flowbridge":
+                    break
+                p = p.parent
+                
         except OSError as exc:
-            db.log(f"přesun {src.name} selhal: {exc}", job_id=job_id, level="warn")
+            db.log(f"presun {src.name} selhal: {exc}", job_id=job_id, level="warn")
             moved.append(str(src))
     return moved
 

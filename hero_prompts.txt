@@ -1,0 +1,13 @@
+"Abstract 3D glowing pedestal, dark sleek background, neon accents, cinematic lighting, perfect for a tech product hero section, high resolution, web design" --count 8 --aspect 16:9 --kind image --tag hero_ideas
+"Floating glass UI cards with vibrant gradient colors on a dark background, depth of field, modern web design hero section, 3d render" --count 8 --aspect 16:9 --kind image --tag hero_ideas
+"Minimalist bright studio setup, a single geometric podium in the center, soft pastel lighting, clean aesthetic, web design hero section background" --count 8 --aspect 16:9 --kind image --tag hero_ideas
+"A futuristic smart home device floating in the center, surrounded by glowing data rings, dark background, cinematic lighting, tech startup hero section" --count 8 --aspect 16:9 --kind image --tag hero_ideas
+"An explosion of colorful powder behind a sleek black smartphone, high speed photography, energetic hero section background, high contrast" --count 8 --aspect 16:9 --kind image --tag hero_ideas
+"A cozy, aesthetic coffee cup on a wooden table, soft morning sunlight, blurred background with plants, lifestyle product hero section, warm tones" --count 8 --aspect 16:9 --kind image --tag hero_ideas
+"Abstract flowing silk fabric in deep blue and purple tones, luxurious aesthetic, soft lighting, elegant web design hero section" --count 8 --aspect 16:9 --kind image --tag hero_ideas
+"A sleek pair of wireless headphones resting on a minimalist concrete block, moody lighting, modern product photography, hero section" --count 8 --aspect 16:9 --kind image --tag hero_ideas
+"Futuristic cyberpunk city skyline at night viewed from a high balcony, neon lights, rainy, atmospheric hero section background" --count 8 --aspect 16:9 --kind image --tag hero_ideas
+"A clean, modern workspace desk with a laptop, plant, and notebook, top-down view, bright lighting, productivity app hero section" --count 8 --aspect 16:9 --kind image --tag hero_ideas
+"A large glowing slash and underscore symbol /_ floating in a dark, atmospheric tech environment, neon lights, cinematic, modern developer tool hero section" --count 12 --aspect 16:9 --kind image --tag hero_logo
+"The symbol /_ made of glowing neon glass, floating over a futuristic city, cyberpunk aesthetic, web design hero background" --count 8 --aspect 16:9 --kind image --tag hero_logo
+"A sleek, minimalist metallic sculpture of the characters /_ on a clean white pedestal, soft studio lighting, elegant hero section" --count 8 --aspect 16:9 --kind image --tag hero_logo

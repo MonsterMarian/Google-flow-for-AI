@@ -511,7 +511,7 @@
 
       for (const url of zeSite()) add(url);
       // Odposlech je presnejsi, ale kdyz mlci, bereme aspon to, co je videt.
-      if (!netReady || !found.length) {
+      if (!netReady || found.length < expected) {
         for (const url of mediaSnapshot()) if (!beforeDom.has(url)) add(url);
       }
 
@@ -795,8 +795,7 @@
     }
 
     if (state.settings.projectUrl) {
-      log("nejsem v projektu, přecházím do zapamatovaného");
-      location.href = state.settings.projectUrl;
+      log("Nejsem v projektu - otevři nějaký projekt ve Flow.", "warn");
       return false;
     }
     log("otevři projekt ve Flow - nemám kam psát prompt", "warn");
