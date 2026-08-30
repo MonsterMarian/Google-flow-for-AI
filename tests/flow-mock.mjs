@@ -15,6 +15,10 @@ import { readFileSync } from "fs";
 
 export const CESTA_CONTENT = new URL("../extension/content.js", import.meta.url);
 
+// 1x1 pruhledny PNG - staci, obsah nikdo nekontroluje
+const MALY_PNG =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+
 export function postavFlow(opts = {}) {
   const dom = new JSDOM("<!doctype html><html><body></body></html>", {
     url: "https://labs.google/fx/tools/flow/project/test-1234",
@@ -32,6 +36,23 @@ export function postavFlow(opts = {}) {
   if (!window.PointerEvent) window.PointerEvent = window.MouseEvent;
   // Chrome je ma, jsdom ne
   if (!window.structuredClone) window.structuredClone = (o) => JSON.parse(JSON.stringify(o));
+  // jsdom prijme jen skutecny FileList; v prohlizeci ho DataTransfer vyrobi
+  Object.defineProperty(window.HTMLInputElement.prototype, "files", {
+    get() { return this._fbFiles || []; },
+    set(v) { this._fbFiles = [...v]; },
+    configurable: true,
+  });
+  if (!window.DataTransfer) {
+    window.DataTransfer = class {
+      constructor() { this._f = []; this.items = { add: (f) => this._f.push(f) }; }
+      get files() { return this._f; }
+    };
+  }
+  if (!window.DragEvent) {
+    window.DragEvent = class extends window.Event {
+      constructor(typ, init = {}) { super(typ, init); this.dataTransfer = init.dataTransfer; }
+    };
+  }
 
   // jsdom nema layout, takze si obdelniky rozdame sami
   const rects = new WeakMap();
@@ -54,6 +75,10 @@ export function postavFlow(opts = {}) {
     hlaseni: [],
     popoverOtevren: false,
     mediaCitac: 0,
+    predlohy: 0,
+    predlohCitac: 0,
+    odeslanoBehemNahravani: 0,
+    nahranePredlohy: [],
   };
 
   // --- ovladaci pruh -------------------------------------------------------
@@ -75,15 +100,55 @@ export function postavFlow(opts = {}) {
     btnNastaveni.textContent = `tune x${stav.nastaveni.pocet}`;
   };
   obnovNastaveni();
-  pruh.append(editor, btnNastaveni, btnPomocne, btnOdeslat);
-  document.body.appendChild(pruh);
+
+  // Flow bere predlohy skrytym vstupnim polem; nahledy se objevi az po nahrani
+  const vstupSouboru = document.createElement("input");
+  vstupSouboru.type = "file";
+  vstupSouboru.accept = "image/*";
+  vstupSouboru.multiple = true;
+  const nahledy = document.createElement("div");
+
+  pruh.append(editor, btnNastaveni, btnPomocne, btnOdeslat, vstupSouboru);
+  const obal = document.createElement("div");   // nahledy sedi vedle pruhu
+  obal.append(pruh, nahledy);
+  document.body.appendChild(obal);
 
   // --- prompt jde zapsat jen pres beforeinput ------------------------------
   let text = "";
+  let nahrava = 0;   // kolik predloh se prave nahrava
   const prekresli = () => {
     editor.textContent = text;
-    btnOdeslat.setAttribute("aria-disabled", text.trim() ? "false" : "true");
+    // dokud se nahrava predloha, Flow odeslat nepusti
+    btnOdeslat.setAttribute("aria-disabled", text.trim() && !nahrava ? "false" : "true");
   };
+
+  // --- predlohy: po vlozeni se chvili nahravaji ----------------------------
+  function zacniNahravat(files) {
+    if (!files || !files.length) return;
+    nahrava = files.length;
+    prekresli();
+    posliNet({ kind: "call", name: "media.upload", method: "POST",
+               status: 200, ok: true, ts: Date.now() });
+    if (opts.nahravaniNikdyNedobehne) return;   // zaseknute nahravani
+    setTimeout(() => {
+      for (let i = 0; i < files.length; i++) {
+        const obalek = document.createElement("div");
+        const img = document.createElement("img");
+        img.src = `https://lh3.googleusercontent.com/predloha${++stav.predlohCitac}=s128`;
+        const x = document.createElement("button");
+        x.setAttribute("aria-label", "Remove reference");
+        dejRect(x, 16, 16);
+        x.addEventListener("pointerdown", () => { obalek.remove(); stav.predlohy--; });
+        obalek.append(img, x);
+        nahledy.appendChild(obalek);
+        stav.predlohy++;
+      }
+      nahrava = 0;
+      prekresli();
+    }, opts.dobaNahravani ?? 2500);
+  }
+  vstupSouboru.addEventListener("change", () => zacniNahravat([...vstupSouboru.files]));
+  editor.addEventListener("drop", (e) => zacniNahravat([...(e.dataTransfer?.files || [])]));
   editor.addEventListener("beforeinput", (e) => {
     if (e.inputType === "insertText") text += e.data ?? "";
     else if (e.inputType === "deleteContentBackward") text = text.slice(0, -1);
@@ -135,9 +200,11 @@ export function postavFlow(opts = {}) {
   // --- generovani ----------------------------------------------------------
   let progress = null;
   function spustGenerovani() {
+    if (nahrava) { stav.odeslanoBehemNahravani++; return false; }  // tlacitko je vypnute
     if (!text.trim()) return false;
     const pocet = stav.nastaveni.typ === "Video" ? 1 : stav.nastaveni.pocet;
-    stav.odeslano.push({ prompt: text, pocet, typ: stav.nastaveni.typ });
+    stav.odeslano.push({ prompt: text, pocet, typ: stav.nastaveni.typ,
+                         predlohy: stav.predlohy });
     text = "";
     prekresli();
     stav.generuje = true;
@@ -210,6 +277,13 @@ export function postavFlow(opts = {}) {
           case "uploadToBridge":
             stav.stazeno.push("můstek:" + msg.tag + "/" + msg.name);
             return { ok: true, path: "C:/outputs/" + msg.tag + "/" + msg.name };
+          case "refGet":
+            if (opts.predlohaChybi) return { ok: false, error: "test: předloha nenalezena" };
+            return { ok: true, base64: MALY_PNG, type: "image/png",
+                     name: String(msg.path).split(/[\/]/).pop(), size: 68 };
+          case "refPut":
+            stav.nahranePredlohy.push(msg.name);
+            return { ok: true, path: "C:/outputs/_predlohy/" + msg.name };
           case "diag":
             return { ok: true, umiLadit: true, pripojeno: [1], posledniChyba: "" };
           case "bridgePull":
@@ -240,5 +314,10 @@ export function postavFlow(opts = {}) {
     window.eval(kod);
   };
 
-  return { dom, window, document, stav, nastavStav, spustContent, posliNet };
+  const dejLog = async () => {
+    const got = await window.chrome.storage.local.get("flowbridge");
+    return (got.flowbridge?.log || []).map((e) => e.msg);
+  };
+
+  return { dom, window, document, stav, nastavStav, spustContent, posliNet, dejLog };
 }

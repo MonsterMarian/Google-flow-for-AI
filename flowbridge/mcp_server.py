@@ -160,6 +160,7 @@ def flow_enqueue_many(
     count: int = 4,
     model: str | None = None,
     aspect: str | None = None,
+    refs: list[str] | None = None,
     tag: str = "default",
     priority: int = 100,
 ) -> dict[str, Any]:
@@ -171,19 +172,25 @@ def flow_enqueue_many(
         count: Kolik kusu na jeden prompt.
         model: Nazev modelu; vychozi z konfigurace.
         aspect: Pomer stran.
+        refs: Absolutni cesty k predlohám - pripoji se ke kazdemu promptu.
         tag: Nazev projektu - urcuje podslozku ve vystupech.
         priority: Nizsi cislo = drivejsi zpracovani.
     """
     db.init()
     if kind not in ("image", "video"):
         return {"ok": False, "error": "kind musí být 'image' nebo 'video'"}
+    bad = [r for r in (refs or []) if not Path(r).exists()]
+    if bad:
+        return {"ok": False, "error": f"Předloha neexistuje: {bad[0]}"}
+    hotove_refs = [str(Path(r).resolve()) for r in (refs or [])]
     limit = MAX_IMAGES_AT_ONCE if kind == "image" else 8
     ids = [
         db.add_job(kind=kind, prompt=p, model=model, count=max(1, min(int(count), limit)),
-                   aspect=aspect, tag=tag, priority=priority, source="mcp")
+                   aspect=aspect, refs=hotove_refs, tag=tag, priority=priority, source="mcp")
         for p in prompts if p.strip()
     ]
-    return {"ok": True, "job_ids": ids, "queued": len(ids)}
+    return {"ok": True, "job_ids": ids, "queued": len(ids),
+            "refs": len(hotove_refs)}
 
 
 # ---------------------------------------------------------------------------

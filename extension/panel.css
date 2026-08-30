@@ -45,6 +45,12 @@
   font: inherit; box-sizing: border-box;
 }
 #flowbridge-panel textarea { resize: vertical; min-height: 66px; }
+#flowbridge-panel input[type="file"] { padding: 6px; font-size: 11.5px; cursor: pointer; }
+#flowbridge-panel input[type="file"]::file-selector-button {
+  background: #2c2c33; color: #e8e8ea; border: 0; border-radius: 5px;
+  padding: 4px 9px; margin-right: 8px; font: inherit; font-size: 11.5px; cursor: pointer;
+}
+#flowbridge-panel button:disabled { opacity: .5; cursor: default; }
 #flowbridge-panel .fb-row { display: flex; gap: 7px; }
 #flowbridge-panel .fb-row > * { flex: 1; min-width: 0; }
 

@@ -203,6 +203,8 @@ def ext_pull(limit: int = 3) -> dict[str, Any]:
             "aspect": job.get("aspect"),
             "duration": job.get("duration"),
             "tag": job.get("tag"),
+            # Rozsireni na disk nevidi - bajty si vyzvedne pres /ext/ref.
+            "refs": [r for r in (job.get("refs") or []) if Path(r).is_file()],
         })
     if out:
         db.log(f"můstek vydal {len(out)} úloh rozšíření")
@@ -290,6 +292,77 @@ def _safe_rel(value: str, fallback: str) -> Path:
     parts = [SAFE_NAME.sub("-", p).strip("-.") for p in str(value).split("/")]
     parts = [p for p in parts if p and p not in (".", "..")]
     return Path(*parts) if parts else Path(fallback)
+
+
+PREDLOHY_DIR = "_predlohy"
+MAX_REF_BYTES = 20 * 1024 * 1024
+
+
+def _ref_allowed(target: Path) -> bool:
+    """Smi se tenhle soubor vydat rozsireni?
+
+    Server sice posloucha jen na smycce, ale i tak nevydavame cokoliv z disku.
+    Projde jen to, co si uzivatel sam dal do fronty jako predlohu, nebo co
+    prosel pres /ext/refs do slozky s predlohami.
+    """
+    predlohy = (CFG.outputs_dir / PREDLOHY_DIR).resolve()
+    if predlohy in target.parents:
+        return True
+    with db.db() as conn:
+        rows = conn.execute(
+            "SELECT refs FROM jobs WHERE refs != '[]' ORDER BY created_at DESC LIMIT 500"
+        ).fetchall()
+    for row in rows:
+        try:
+            for raw in json.loads(row["refs"] or "[]"):
+                if Path(raw).resolve() == target:
+                    return True
+        except (json.JSONDecodeError, OSError):
+            continue
+    return False
+
+
+@app.get("/ext/ref")
+def ext_ref(path: str) -> FileResponse:
+    """Vyda predlohu rozsireni, aby ji mohlo pripojit k promptu ve Flow.
+
+    Rozsireni na lokalni disk nevidi, takze obrazek musi dostat po HTTP.
+    """
+    db.init()
+    target = Path(path).resolve()
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="Předloha neexistuje.")
+    if target.stat().st_size > MAX_REF_BYTES:
+        raise HTTPException(status_code=413, detail="Předloha je moc velká.")
+    if not _ref_allowed(target):
+        raise HTTPException(status_code=403, detail="Tenhle soubor není mezi předlohami.")
+    return FileResponse(target)
+
+
+@app.post("/ext/refs")
+async def ext_refs(request: Request, name: str = "predloha.png") -> dict[str, Any]:
+    """Prijme predlohu vybranou v panelu a ulozi ji na disk.
+
+    Panel bezi ve strance, takze vybrany soubor nema kam odlozit - v uloziste
+    rozsireni by se velky obrazek nevesel a fronta prezivajici obnoveni stranky
+    by prisla o obsah. Ulozi se proto sem a uloha nese jen cestu, uplne stejne
+    jako kdyz predlohu zada agent pres MCP.
+    """
+    db.init()
+    data = await request.body()
+    if not data:
+        raise HTTPException(status_code=400, detail="prázdné tělo požadavku")
+    if len(data) > MAX_REF_BYTES:
+        raise HTTPException(status_code=413, detail="Předloha je moc velká.")
+
+    folder = CFG.outputs_dir / PREDLOHY_DIR
+    folder.mkdir(parents=True, exist_ok=True)
+    dest = folder / _safe_rel(name, "predloha.png").name
+    if dest.exists():
+        dest = dest.with_name(f"{dest.stem}-{int(dt.datetime.now().timestamp())}{dest.suffix}")
+    dest.write_bytes(data)
+    db.log(f"předloha uložena: {dest.name} ({len(data) // 1024} kB)")
+    return {"ok": True, "path": str(dest), "bytes": len(data)}
 
 
 @app.post("/ext/upload")

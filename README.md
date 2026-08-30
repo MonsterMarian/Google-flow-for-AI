@@ -42,7 +42,8 @@ dashboard i agenti vědí, kam se generuje — nikam ji neopisuješ.
 
 1. Do pole napiš prompty — **jeden na řádek**, klidně dvacet.
 2. Vyber typ (obrázek/video), počet kusů, poměr stran, případně model.
-3. **Přidat do fronty**. (Se zapnutým autopilotem se rozjede samo,
+3. Volitelně přidej **předlohy** — obrázky, které jdou do promptu.
+4. **Přidat do fronty**. (Se zapnutým autopilotem se rozjede samo,
    jinak ještě **Spustit**.)
 
 Panel pak jede sám: odesílá, čeká, stahuje. Můžeš ho sbalit šipkou v hlavičce
@@ -80,6 +81,7 @@ prostě vysyp do textového souboru.
 | **Spuštění** | S autopilotem se fronta rozjede sama, jakmile v ní něco přistane — od tebe i od agenta. Nic se neklikne. |
 | **Odesílání** | Důvěryhodný klik na šipku přes ladicí rozhraní (viz níže), Enter jen jako záloha. Nemusíš u toho být. |
 | **Potvrzení** | Že Flow prompt vzal, se pozná ze zachyceného síťového volání — ne z odhadu podle tlačítka. Nic se neodešle dvakrát. |
+| **Předlohy** | Vloží obrázky do promptu a **počká, až se nahrají**. Dřív neodešle — jinak by se generovalo bez nich. |
 | **Tempo** | Pauza mezi odesláními je náhodná v rozmezí, které nastavíš v panelu (výchozí 4–11 s). Mezi vlnami je delší, taky náhodná. |
 | **Sledování** | Každá úloha si drží `hotovo/celkem`; panel to ukazuje živě, můstek zná stav zvenčí. |
 | **Opakování** | Když se z dávky vrátí míň kusů, než se odeslalo, pustí stejný prompt znovu na chybějící počet — až třikrát, s rostoucím odstupem. |
@@ -87,6 +89,38 @@ prostě vysyp do textového souboru.
 | **Stahování** | Hotové kusy stáhne a roztřídí. Když prohlížeč stahování odmítne, stáhne je rozšíření samo a uloží přes můstek. |
 | **Přerušení** | Zavřeš prohlížeč? Fronta i stav `běží` jsou v úložišti rozšíření. Po otevření projektu naváže tam, kde skončilo. |
 | **Chyby** | Když nesedí selektor, uloží se dump stránky (viz Diagnostika) a úloha se označí jako chybná — nic dalšího se nerozbije. |
+
+## Předlohy: obrázky do promptu
+
+Jeden nebo víc obrázků, podle kterých má Flow generovat.
+
+```bash
+python -m flowbridge add "kočka v tomhle stylu" --ref C:\obrazky\styl.png --count 12
+```
+
+```bash
+python -m flowbridge addfile prompty.txt --ref C:\obrazky\styl.png --per-prompt 20
+```
+
+Agent to zadá stejně — `flow_enqueue_image`, `flow_enqueue_video`
+i `flow_enqueue_many` berou `refs` (absolutní cesty). V panelu je na to
+políčko **předlohy**; ty se uloží na můstek, takže přežijí obnovení stránky.
+Bez zapnutého můstku předlohy nejdou — obrázek by neměl kde zůstat.
+
+### Proč se na ně čeká
+
+**Po vložení se obrázek do Flow chvíli nahrává** a odeslat je do té doby
+vypnuté. Kdyby se odeslalo dřív, vygeneruje se to bez předlohy — u videa
+za kredity a nadarmo. FlowBridge proto čeká, dokud nesedí tři věci naráz:
+zachycené volání na nahrání, náhled u promptu a znovu zapnuté odeslat.
+K tomu chvíle klidu, aby se nečekalo jen na první z několika obrázků.
+
+Když se to do `refWaitSeconds` (výchozí 120 s) nestihne, dávka se **neodešle**
+a úloha skončí chybou — lepší než sto obrázků podle špatné předlohy.
+
+Vkládá se dvěma způsoby: skrytým `<input type="file">`, a když ten není,
+přetažením. Mezi dávkami jedné úlohy se předlohy nevkládají znovu, Flow si je
+drží; před úlohou bez předloh se naopak odeberou.
 
 ## Jak se obchází limit „4 obrázky naráz"
 
@@ -270,8 +304,8 @@ aniž by kdy viděl tvou obrazovku.
   a řádek s cenou v kreditech.
 
 **Ověřeno testy proti napodobě stránky** (`tests/`, viz níže) — motor fronty,
-dávkování, dopočet chybějících kusů, stahování včetně náhradní cesty, autopilot
-a automatická diagnostika.
+dávkování, dopočet chybějících kusů, stahování včetně náhradní cesty, autopilot,
+automatická diagnostika a předlohy včetně čekání na jejich nahrání.
 
 **Zatím neověřeno živým během:**
 
@@ -303,6 +337,8 @@ cd tests && npm install && npm test
 | „Nenašel jsem pole pro prompt" | otevři konkrétní **projekt**, ne úvodní přehled |
 | „Panel s nastavením se neotevřel" | Google změnil vzhled → klikni **Diagnostika** a podle dumpu uprav `popover()` v `content.js` |
 | „odposlech sítě neběží" | načti rozšíření znovu v `chrome://extensions` a obnov stránku — `inject.js` se musí spustit před stránkou |
+| „předlohy se nenahrály" | pomalé připojení → zvedni `refWaitSeconds` v `content.js`; jinak klikni **Diagnostika**, v dumpu je i `predlohy.vstupniPole` |
+| „předlohy potřebují zapnutý můstek" | zapni **Můstek** v panelu; obrázek se ukládá na disk, ne do rozšíření |
 | nestahuje se | zkontroluj v Chrome oprávnění ke stahování; se zapnutým můstkem se to zkusí i druhou cestou (uloží to server) |
 | můstek nefunguje | běží `python -m flowbridge dashboard`? Je můstek v panelu na „zap"? |
 | nic se nespustí | `python -m flowbridge status` řekne, jestli se prohlížeč hlásí, je v projektu a co naposled dělal |
@@ -331,5 +367,7 @@ flowbridge/         volitelná část pro AI agenty
     cli.py          příkazová řádka
     config.py, state.py
 
-tests/              napodoba stránky Flow + test motoru fronty (Node + jsdom)
+tests/              napodoba stránky Flow (Node + jsdom)
+    test-beh.mjs        motor fronty, dávkování, stahování, autopilot
+    test-predlohy.mjs   obrázky v promptu a čekání na nahrání
 ```

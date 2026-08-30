@@ -130,6 +130,11 @@ def cmd_addfile(args: argparse.Namespace) -> None:
     else:
         prompts = [ln.strip() for ln in path.read_text(encoding="utf-8").splitlines()
                    if ln.strip() and not ln.strip().startswith("#")]
+        # predlohy z --ref se pripoji ke kazdemu promptu ze souboru
+        refs = [str(Path(r).resolve()) for r in (args.ref or [])]
+        chybi = [r for r in refs if not Path(r).exists()]
+        if chybi:
+            raise SystemExit(f"Předloha neexistuje: {chybi[0]}")
         per = args.per_prompt or default_count(args)
         max_batch = 12 if args.kind == "image" else 4
         for i, line in enumerate(prompts):
@@ -139,7 +144,7 @@ def cmd_addfile(args: argparse.Namespace) -> None:
             while zbyva > 0:
                 kus = min(max_batch, zbyva)
                 db.add_job(kind=args.kind, prompt=line, model=args.model,
-                           count=kus, aspect=args.aspect, tag=args.tag,
+                           count=kus, aspect=args.aspect, refs=refs, tag=args.tag,
                            priority=args.priority + i, source="file")
                 added += 1
                 zbyva -= kus
@@ -326,6 +331,8 @@ def build_parser() -> argparse.ArgumentParser:
     add_job_flags(sp)
     sp.add_argument("--per-prompt", type=int, default=None,
                     help="kolik kusů na každý prompt; větší číslo se rozdělí na úlohy po 12")
+    sp.add_argument("--ref", action="append",
+                    help="předloha připojená ke každému promptu (lze vícekrát)")
     sp.set_defaults(func=cmd_addfile)
 
     sp = sub.add_parser("list", help="vypíše frontu")

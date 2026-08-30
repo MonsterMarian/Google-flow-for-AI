@@ -25,6 +25,8 @@
       wavePauseSeconds: 6,
       maxAttempts: 3,
       waitTimeoutSeconds: 900,
+      refWaitSeconds: 120,
+      refSettleSeconds: 3,
       maxCreditsPerJob: 60,
       bridgeUrl: "http://127.0.0.1:8765",
       bridgeEnabled: true,
@@ -394,6 +396,192 @@
     return est;
   }
 
+  // -------------------------------------------------------------------------
+  // predlohy - obrazky, ktere jdou do promptu
+  //
+  // Flow je bere pretazenim nebo skrytym <input type="file">. Po vlozeni se
+  // chvili NAHRAVAJI a odeslat je do te doby vypnute. Kdyz se odesle driv,
+  // vygeneruje se to bez predlohy - proto se vzdy ceka na dokonceni.
+  // -------------------------------------------------------------------------
+
+  const UPLOAD_CALL = /upload|ingest|asset|createMedia|media\.create|blob/i;
+
+  function base64ToFile(base64, name, type) {
+    const bin = atob(base64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return new File([bytes], name || "predloha.png", { type: type || "image/png" });
+  }
+
+  /* Bajty vozi service worker od mustku - obsahovy skript na disk nevidi. */
+  async function nactiPredlohy(job) {
+    const cesty = job.refs || [];
+    if (!cesty.length) return [];
+    if (!state.settings.bridgeEnabled) {
+      throw new Error("předlohy potřebují zapnutý můstek");
+    }
+    const soubory = [];
+    for (const cesta of cesty) {
+      const res = await withTimeout(
+        chrome.runtime.sendMessage({
+          type: "refGet", bridgeUrl: state.settings.bridgeUrl, path: cesta,
+        }),
+        30000,
+        { ok: false, error: "můstek neodpověděl" }
+      );
+      const jmeno = String(cesta).split(/[\\/]/).pop();
+      if (!res?.ok) throw new Error(`předlohu ${jmeno} se nepodařilo načíst: ${res?.error}`);
+      soubory.push(base64ToFile(res.base64, res.name, res.type));
+    }
+    return soubory;
+  }
+
+  /* Kolik predloh je ted videt u promptu. Hleda se v okoli ovladaciho pruhu,
+     ne v celem projektu - tam jsou i hotove vysledky. */
+  function pocetPredloh() {
+    const b = bar();
+    const kde = b?.parentElement || b;
+    if (!kde) return 0;
+    let n = 0;
+    for (const img of kde.querySelectorAll("img")) {
+      const src = img.currentSrc || img.src || "";
+      if (!src || src.includes("googleusercontent.com/a/")) continue;
+      n++;
+    }
+    return n;
+  }
+
+  function fileInput() {
+    const pole = [...document.querySelectorAll('input[type="file"]')];
+    return pole.find((i) => !i.accept || /image|\*/i.test(i.accept)) || pole[pole.length - 1] || null;
+  }
+
+  function dataTransferZ(files) {
+    const dt = new DataTransfer();
+    for (const f of files) dt.items.add(f);
+    return dt;
+  }
+
+  /* Obě cesty musí umět jen vrátit false. Kdyby házely, druhá by se nikdy
+     nezkusila - a přitom jsou tu právě proto, že jedna z nich může selhat. */
+  function pripojPresInput(files) {
+    try {
+      const cil = fileInput();
+      if (!cil) return false;
+      cil.files = dataTransferZ(files).files;
+      cil.dispatchEvent(new Event("input", { bubbles: true }));
+      cil.dispatchEvent(new Event("change", { bubbles: true }));
+      return true;
+    } catch (e) {
+      log(`vložení přes vstupní pole selhalo: ${e.message || e}`, "warn");
+      return false;
+    }
+  }
+
+  function pripojPresDrop(files) {
+    try {
+      const cil = editor() || bar();
+      if (!cil) return false;
+      const zaklad = { bubbles: true, cancelable: true, composed: true };
+      for (const typ of ["dragenter", "dragover", "drop"]) {
+        cil.dispatchEvent(new DragEvent(typ, { ...zaklad, dataTransfer: dataTransferZ(files) }));
+      }
+      return true;
+    } catch (e) {
+      log(`přetažení selhalo: ${e.message || e}`, "warn");
+      return false;
+    }
+  }
+
+  /* Ceka, az Flow predlohy dojede nahravat.
+
+     Potvrzeni skladame ze tri veci, protoze zadna sama o sobe nestaci:
+     zachyceneho volani na nahrani, poctu nahledu u promptu a toho, ze se
+     odeslat zase zapnulo. K tomu chvile klidu, aby se necekalo jen na prvni
+     z nekolika obrazku. */
+  async function pockejNaPredlohy(kolik, od) {
+    const limit = state.settings.refWaitSeconds * 1000;
+    const usadit = state.settings.refSettleSeconds * 1000;
+    const zacatek = Date.now();
+    let posledniZmena = zacatek;
+    let minuly = pocetPredloh();
+    let videnoNahrani = false;
+
+    while (Date.now() - zacatek < limit) {
+      await sleep(500);
+      if (!state.running) return false;
+
+      if (netCalls.some((c) => c.ts >= od && c.method === "POST"
+                               && UPLOAD_CALL.test(c.name || ""))) {
+        videnoNahrani = true;
+      }
+      const ted = pocetPredloh();
+      if (ted !== minuly) {
+        minuly = ted;
+        posledniZmena = Date.now();
+      }
+
+      const dorazilo = videnoNahrani || ted >= kolik;
+      const klid = Date.now() - posledniZmena > usadit;
+      if (dorazilo && klid && submitReady()
+          && !document.querySelector('[role="progressbar"]')) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /* Zbytky po predchozi uloze musi pryc - jinak by se dalsi prompt generoval
+     podle cizi predlohy. */
+  async function vycistiPredlohy() {
+    if (!pocetPredloh()) return true;
+    const b = bar();
+    const kde = b?.parentElement || b;
+    if (!kde) return false;
+
+    for (let i = 0; i < 8 && pocetPredloh(); i++) {
+      const tlacitko = [...kde.querySelectorAll(CLICKABLE)].find((el) => {
+        const popis = ((el.getAttribute("aria-label") || "") + " " + norm(el)).trim();
+        // kratky popisek, at se netrefime do neceho jineho nez do křížku u náhledu
+        return popis.length < 40 && /remove|odebrat|smazat|delete|discard|✕|×/i.test(popis);
+      });
+      if (!tlacitko) break;
+      realClick(tlacitko);
+      await sleep(400);
+    }
+    if (pocetPredloh()) {
+      log("nepodařilo se odebrat předlohy z minulé úlohy - odeber je ručně", "warn");
+      return false;
+    }
+    return true;
+  }
+
+  /* Vrati pocet pripojenych predloh, nebo hodi chybu. */
+  async function zajistiPredlohy(job) {
+    const soubory = await nactiPredlohy(job);
+    if (!soubory.length) {
+      await vycistiPredlohy();
+      return 0;
+    }
+    // Mezi davkami jedne ulohy si je Flow drzi - nevkladame je znovu.
+    if (pocetPredloh() >= soubory.length) return soubory.length;
+    await vycistiPredlohy();
+
+    for (const [jmeno, pripoj] of [["vstupní pole", pripojPresInput],
+                                   ["přetažení", pripojPresDrop]]) {
+      if (!pripoj(soubory)) continue;
+      const od = Date.now();
+      log(`vkládám ${soubory.length} předloh (${jmeno}), čekám na nahrání...`);
+      if (await pockejNaPredlohy(soubory.length, od)) {
+        log(`předlohy nahrané: ${soubory.length}`);
+        return soubory.length;
+      }
+      log(`přes ${jmeno} se předlohy nenahrály, zkouším dál`, "warn");
+      await vycistiPredlohy();
+    }
+    throw new Error(`předlohy se nenahrály do ${state.settings.refWaitSeconds} s`);
+  }
+
   /* Flow spusti generovani jen na skutecnou udalost od uzivatele.
      Syntetický klik ani syntetický Enter neprojdou - proto to jde pres
      ladici rozhrani prohlizece (viz background.js).
@@ -655,6 +843,7 @@
     log(`start: ${job.kind} x${job.count} - ${job.prompt.slice(0, 60)}`);
 
     let prazdnychVln = 0;
+    let posledniChyba = "";   // aby v hlášení o selhání nebylo jen "nepodařilo se"
 
     while (job.done.length < job.count && state.running) {
       const remaining = job.count - job.done.length;
@@ -667,6 +856,9 @@
         if (!state.running) break;
         try {
           await setPrompt(job.prompt);
+          // Předlohy až po promptu: Flow drží odeslat vypnuté, dokud se
+          // nenahrají, a to je zároveň signál, že je má.
+          await zajistiPredlohy(job);
           const est = await configure(job, size);
           if (job.kind === "video" && est != null && est > state.settings.maxCreditsPerJob) {
             throw new Error(`odhad ${est} kr. překračuje strop ${state.settings.maxCreditsPerJob} kr.`);
@@ -678,7 +870,8 @@
         } catch (e) {
           // jedna davka neprosla - zbytek vlny jede dal, chybejici kusy
           // se dopočítají v dalším kole
-          log(`dávka neprošla: ${e.message || e}`, "warn");
+          posledniChyba = String(e.message || e);
+          log(`dávka neprošla: ${posledniChyba}`, "warn");
         }
         render();
         await sleep(randomPause());
@@ -686,7 +879,10 @@
 
       if (!submitted) {
         prazdnychVln++;
-        if (prazdnychVln >= 3) throw new Error("třikrát po sobě se nepodařilo odeslat");
+        if (prazdnychVln >= 3) {
+          throw new Error("třikrát po sobě se nepodařilo odeslat"
+            + (posledniChyba ? ` (${posledniChyba})` : ""));
+        }
         await sleep(20000 * prazdnychVln);
         continue;
       }
@@ -918,6 +1114,7 @@
           model: j.model || null,
           aspect: j.aspect || null,
           duration: j.duration || null,
+          refs: Array.isArray(j.refs) ? j.refs : [],
           tag: j.tag || "agent",
           status: "queued",
           done: [],
@@ -976,7 +1173,7 @@
   // -------------------------------------------------------------------------
 
   const POTREBA_DIAGNOSTIKA =
-    /Nenašel jsem|neotevřel|nepřijal|nepřevzal|nezareagoval|nepodařilo|nepřibylo/i;
+    /Nenašel jsem|neotevřel|nepřijal|nepřevzal|nezareagoval|nepodařilo|nepřibylo|nenahrály/i;
 
   let dumpBezi = false;
 
@@ -1014,6 +1211,12 @@
       kredity: creditBalance,
       editor: ed ? popisPrvku(ed) : null,
       editorText: ed ? editorText(ed).slice(0, 200) : null,
+      predlohy: {
+        nahledu: pocetPredloh(),
+        vstupniPole: [...document.querySelectorAll('input[type="file"]')].map((i) => ({
+          accept: i.accept || null, multiple: i.multiple, skryte: !i.offsetParent,
+        })),
+      },
       pruh: b ? [...b.querySelectorAll("button")].map(popisPrvku) : null,
       odeslat: sb ? { ...popisPrvku(sb), pripraveno: submitReady() } : null,
       popover: null,
@@ -1129,6 +1332,8 @@
         </div>
         <label>model (prázdné = co je zrovna nastavené)</label>
         <input id="fb-model" placeholder="Nano Banana 2">
+        <label>předlohy – obrázky do promptu (potřebují můstek)</label>
+        <input id="fb-refs" type="file" accept="image/*" multiple>
         <label>složka pro výstupy</label>
         <input id="fb-tag" value="default">
         <div class="fb-row">
@@ -1216,7 +1421,53 @@
     panel.classList.toggle("fb-collapsed", !!state.settings.collapsed);
   }
 
-  function addFromForm() {
+  function souborNaBase64(file) {
+    return new Promise((resolve, reject) => {
+      const fr = new FileReader();
+      fr.onload = () => resolve(String(fr.result).split(",")[1] || "");
+      fr.onerror = () => reject(new Error("soubor se nepodařilo přečíst"));
+      fr.readAsDataURL(file);
+    });
+  }
+
+  /* Predlohy vybrane v panelu putuji na mustek a uloha nese jen cestu -
+     stejne jako kdyz je zada agent pres MCP. V ulozisti rozsireni by se
+     obrazky nevesly a fronta by po obnoveni stranky prisla o jejich obsah.
+
+     Vraci pole cest, prazdne pole (nic nevybrano) nebo null pri chybe. */
+  async function nahrajPredlohy(fileList) {
+    const soubory = [...(fileList || [])];
+    if (!soubory.length) return [];
+    if (!state.settings.bridgeEnabled) {
+      log("předlohy potřebují zapnutý můstek - nemají kde zůstat", "warn");
+      return null;
+    }
+    const cesty = [];
+    for (const f of soubory) {
+      const res = await withTimeout(
+        chrome.runtime.sendMessage({
+          type: "refPut",
+          bridgeUrl: state.settings.bridgeUrl,
+          name: f.name,
+          base64: await souborNaBase64(f),
+        }),
+        60000,
+        { ok: false, error: "můstek neodpověděl" }
+      );
+      if (!res?.ok) {
+        log(`předloha ${f.name}: ${res?.error}`, "warn");
+        return null;
+      }
+      cesty.push(res.path);
+    }
+    log(`předlohy uložené na můstku: ${cesty.length}`);
+    return cesty;
+  }
+
+  let pridavaSe = false;
+
+  async function addFromForm() {
+    if (pridavaSe) return;
     const raw = panel.querySelector("#fb-prompt").value;
     const prompts = raw.split("\n").map((s) => s.trim()).filter(Boolean);
     if (!prompts.length) return;
@@ -1226,6 +1477,18 @@
     const duration = parseInt(panel.querySelector("#fb-duration").value, 10) || null;
     const model = panel.querySelector("#fb-model").value.trim() || null;
     const tag = panel.querySelector("#fb-tag").value.trim() || "default";
+    const poleRefs = panel.querySelector("#fb-refs");
+
+    let refs;
+    pridavaSe = true;
+    panel.querySelector("#fb-add").disabled = true;
+    try {
+      refs = await nahrajPredlohy(poleRefs.files);
+    } finally {
+      pridavaSe = false;
+      panel.querySelector("#fb-add").disabled = false;
+    }
+    if (refs === null) return; // důvod je v logu
 
     for (const prompt of prompts) {
       state.jobs.push({
@@ -1236,6 +1499,7 @@
         model,
         aspect,
         duration,
+        refs,
         tag,
         status: "queued",
         done: [],
@@ -1243,7 +1507,8 @@
       });
     }
     panel.querySelector("#fb-prompt").value = "";
-    log(`přidáno ${prompts.length} úloh`);
+    poleRefs.value = "";
+    log(`přidáno ${prompts.length} úloh${refs.length ? ` s ${refs.length} předlohami` : ""}`);
     save();
     render();
     if (state.settings.autopilot && !state.running) start();
@@ -1298,7 +1563,8 @@
             <button class="fb-x" data-del="${j.id}" title="odebrat">×</button>
           </div>
           <div class="fb-meta">${j.kind === "video" ? "video" : "obrázky"} ·
-            ${got}/${j.count} · ${esc(j.tag)}${j.credits ? " · " + j.credits + " kr." : ""}</div>
+            ${got}/${j.count} · ${esc(j.tag)}${j.credits ? " · " + j.credits + " kr." : ""}${
+              (j.refs || []).length ? ` · ${j.refs.length}&nbsp;předloh` : ""}</div>
           ${j.error ? `<div class="fb-err">${esc(j.error)}</div>` : ""}
         </div>`;
       })

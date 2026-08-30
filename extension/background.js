@@ -221,8 +221,88 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  if (msg?.type === "refGet") {
+    refGet(msg.bridgeUrl, msg.path).then(sendResponse);
+    return true;
+  }
+
+  if (msg?.type === "refPut") {
+    refPut(msg.bridgeUrl, msg.name, msg.base64).then(sendResponse);
+    return true;
+  }
+
   return false;
 });
+
+/* ---------------------------------------------------------------------------
+ * Predlohy (obrazky, ktere jdou do promptu)
+ *
+ * Obsahovy skript na disk nevidi a mustek je na jine adrese, takze bajty vozi
+ * service worker. Prenasi se base64 - zpravy mezi castmi rozsireni se
+ * serializuji jako JSON, cimz by Blob ani ArrayBuffer neprosly.
+ * ------------------------------------------------------------------------- */
+
+/* String.fromCharCode(...pole) spadne na velkem obrazku (prekroci limit
+   argumentu), proto po kouscich. */
+function bytesToBase64(bytes) {
+  let bin = "";
+  const krok = 0x8000;
+  for (let i = 0; i < bytes.length; i += krok) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + krok));
+  }
+  return btoa(bin);
+}
+
+function base64ToBytes(b64) {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+async function refGet(bridgeUrl, path) {
+  if (!bridgeUrl) return { ok: false, error: "můstek není zapnutý" };
+  try {
+    const url = bridgeUrl.replace(/\/$/, "") + "/ext/ref?path=" + encodeURIComponent(path);
+    const r = await fetch(url, { cache: "no-store" });
+    if (!r.ok) {
+      let detail = "HTTP " + r.status;
+      try {
+        detail = (await r.json())?.detail || detail;
+      } catch {
+        /* odpoved bez JSON */
+      }
+      return { ok: false, error: detail };
+    }
+    const buf = new Uint8Array(await r.arrayBuffer());
+    if (!buf.length) return { ok: false, error: "prázdná předloha" };
+    return {
+      ok: true,
+      base64: bytesToBase64(buf),
+      type: r.headers.get("content-type") || "image/png",
+      name: path.split(/[\\/]/).pop() || "predloha.png",
+      size: buf.length,
+    };
+  } catch (e) {
+    return { ok: false, error: String(e?.message || e) };
+  }
+}
+
+async function refPut(bridgeUrl, name, base64) {
+  if (!bridgeUrl) return { ok: false, error: "můstek není zapnutý" };
+  try {
+    const url = bridgeUrl.replace(/\/$/, "") + "/ext/refs?name=" + encodeURIComponent(name || "predloha.png");
+    const r = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/octet-stream" },
+      body: base64ToBytes(base64),
+    });
+    if (!r.ok) return { ok: false, error: "můstek HTTP " + r.status };
+    return { ok: true, ...(await r.json()) };
+  } catch (e) {
+    return { ok: false, error: String(e?.message || e) };
+  }
+}
 
 /* Stahne soubor a POCKA, az je opravdu na disku.
    Vraci absolutni cestu, aby ho mustek mohl rovnou presunout jinam. */
