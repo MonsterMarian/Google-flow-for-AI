@@ -1,0 +1,12 @@
+{
+  "name": "flowbridge-tests",
+  "private": true,
+  "type": "module",
+  "description": "Test motoru fronty proti napodobě stránky Google Flow.",
+  "scripts": {
+    "test": "node test-beh.mjs"
+  },
+  "devDependencies": {
+    "jsdom": "^28.0.0"
+  }
+}

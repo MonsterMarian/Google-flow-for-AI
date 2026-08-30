@@ -25,11 +25,25 @@ a vpravo dole se objeví panel FlowBridge.
 
 ---
 
-## Jak se používá
+## Postup, na který je to stavěné
+
+1. Ve Flow si založ **nový prázdný projekt** a nech ho otevřený.
+2. Spusť můstek: `python -m flowbridge dashboard`
+3. V panelu zkontroluj, že svítí **Můstek: zap** a **Autopilot: zap**
+   (obojí je tak výchozí).
+4. Od téhle chvíle stačí sypat prompty — ty nebo AI agent přes MCP.
+
+Dál už nemusíš dělat nic. **Autopilot** (výchozí zap) rozjede frontu sám,
+jakmile v ní něco přistane, a po vygenerování se všechno samo stáhne
+a roztřídí. Panel si adresu projektu zapamatuje a pošle ji můstku, takže
+dashboard i agenti vědí, kam se generuje — nikam ji neopisuješ.
+
+## Jak se používá ručně
 
 1. Do pole napiš prompty — **jeden na řádek**, klidně dvacet.
 2. Vyber typ (obrázek/video), počet kusů, poměr stran, případně model.
-3. **Přidat do fronty** → **Spustit**.
+3. **Přidat do fronty**. (Se zapnutým autopilotem se rozjede samo,
+   jinak ještě **Spustit**.)
 
 Panel pak jede sám: odesílá, čeká, stahuje. Můžeš ho sbalit šipkou v hlavičce
 nebo přetáhnout jinam. Stav přežije i obnovení stránky.
@@ -63,13 +77,16 @@ prostě vysyp do textového souboru.
 
 | | |
 |---|---|
-| **Odesílání** | Enterem přes ladicí rozhraní (viz níže). Nemusíš u toho být. |
-| **Tempo** | Pauza mezi odesláními je náhodná v rozmezí, které nastavíš v panelu (výchozí 4–9 s). Mezi vlnami je delší, taky náhodná. |
-| **Sledování** | Každá úloha si drží `hotovo/celkem`; panel to ukazuje živě. |
+| **Spuštění** | S autopilotem se fronta rozjede sama, jakmile v ní něco přistane — od tebe i od agenta. Nic se neklikne. |
+| **Odesílání** | Důvěryhodný klik na šipku přes ladicí rozhraní (viz níže), Enter jen jako záloha. Nemusíš u toho být. |
+| **Potvrzení** | Že Flow prompt vzal, se pozná ze zachyceného síťového volání — ne z odhadu podle tlačítka. Nic se neodešle dvakrát. |
+| **Tempo** | Pauza mezi odesláními je náhodná v rozmezí, které nastavíš v panelu (výchozí 4–11 s). Mezi vlnami je delší, taky náhodná. |
+| **Sledování** | Každá úloha si drží `hotovo/celkem`; panel to ukazuje živě, můstek zná stav zvenčí. |
 | **Opakování** | Když se z dávky vrátí míň kusů, než se odeslalo, pustí stejný prompt znovu na chybějící počet — až třikrát, s rostoucím odstupem. |
 | **Odmítnutí** | Pozná hlášky „unusual activity" i „violate our policies" a napíše je do logu jako důvod. |
-| **Stahování** | Hotové kusy stáhne a roztřídí; `python tools/presun_na_plochu.py` je pak přesune, kam chceš. |
+| **Stahování** | Hotové kusy stáhne a roztřídí. Když prohlížeč stahování odmítne, stáhne je rozšíření samo a uloží přes můstek. |
 | **Přerušení** | Zavřeš prohlížeč? Fronta i stav `běží` jsou v úložišti rozšíření. Po otevření projektu naváže tam, kde skončilo. |
+| **Chyby** | Když nesedí selektor, uloží se dump stránky (viz Diagnostika) a úloha se označí jako chybná — nic dalšího se nerozbije. |
 
 ## Jak se obchází limit „4 obrázky naráz"
 
@@ -100,9 +117,10 @@ pip install -r requirements.txt
 python -m flowbridge dashboard
 ```
 
-Pak v panelu FlowBridge klikni na **Můstek: vyp** → přepne se na **zap**.
-Rozšíření si od té chvíle chodí pro úlohy na `http://127.0.0.1:8765`
-a po dokončení hlásí zpět, co vygenerovalo.
+Můstek je v panelu zapnutý už z výroby (**Můstek: zap**). Rozšíření si chodí
+pro úlohy na `http://127.0.0.1:8765`, po dokončení hlásí zpět, co vygenerovalo,
+a každých 10 s posílá tep — z něj dashboard ví, jestli je v projektu, jestli
+běží odposlech a co naposledy dělalo.
 
 Dashboard na <http://127.0.0.1:8765> ukazuje frontu, historii a útratu kreditů.
 
@@ -129,6 +147,8 @@ složce spustíš relaci. Pro jiného klienta zaregistruj:
 | `flow_models` | modely a jejich cena v kreditech |
 | `flow_cancel` | zruší úlohu |
 | `flow_set_paused` | pozastaví / spustí vydávání úloh |
+| `flow_set_project` | určí projekt ve Flow, do kterého se generuje |
+| `flow_diagnostics` | dump stránky — podle něj se opravují selektory |
 
 ### Fronta z příkazové řádky
 
@@ -140,7 +160,8 @@ python -m flowbridge add "neonová kočka na střeše, filmové světlo" --count
 python -m flowbridge addfile prompty.txt --count 12 --tag kampan
 ```
 
-Dál: `list`, `status --events 20`, `cancel <id>`, `retry <id>`, `pause`, `resume`.
+Dál: `list`, `status --events 20`, `cancel <id>`, `retry <id>`, `pause`, `resume`,
+`project [url]`, `dump [--list]`.
 
 ---
 
@@ -196,14 +217,48 @@ rozšířením. Po tomhle jednom kliknutí už FlowBridge jede bez dozoru.
 Poznáš to podle lišty **„FlowBridge ladí tento prohlížeč"** nad stránkou.
 Ta lišta musí zůstat; když ji zavřeš, odesílání přestane fungovat.
 
-### Zásadní omezení
+### Jak se odesílá
 
-**Rozšíření samo neumí zmáčknout odeslat.** Content script produkuje netrusted
-události a Flow je na odeslání ignoruje. Panel proto zvládne všechno ostatní
-(fronta, nastavení, čekání, stahování, třídění), ale vlastní odeslání musí
-spustit buď člověk, nebo nástroj s přístupem k CDP. Řešení do budoucna je
-`chrome.debugger` v manifestu — Chrome pak povolí posílat důvěryhodné vstupy
-(za cenu lišty „FlowBridge ladí tento prohlížeč").
+Content script vyrábí netrusted události a Flow je na odeslání ignoruje.
+Odesílá se proto přes `chrome.debugger` (`Input.dispatchMouseEvent`), což je
+vstup na stejné úrovni jako klávesnice — odtud ta lišta o ladění.
+
+Pořadí je stejné jako u člověka: **důvěryhodný klik na šipku**, a teprve když
+se do pár vteřin nic nestane, **důvěryhodný Enter**. Mezi tím se čeká na
+potvrzení, aby se prompt neposlal dvakrát.
+
+## Odposlech síťových odpovědí
+
+`inject.js` běží v hlavním světě stránky a čte odpovědi z `/fx/api/trpc`.
+Řeší tři věci, na které DOM nestačí:
+
+| | |
+|---|---|
+| **Plné adresy médií** | Seznam ve Flow je virtualizovaný a v `<img>` je zmenšený náhled. V odpovědi je rovnou plná adresa. |
+| **Důkaz o odeslání** | Zachycené volání na generování je jistota, ne odhad podle vzhledu tlačítka. |
+| **Zůstatek kreditů** | Vyčte se z odpovědi a pošle můstku, takže ho vidí i dashboard. |
+
+Nic se nemění, jen se čte, a ven jde `postMessage` na vlastní origin.
+Kdyby odposlech nefungoval, panel spadne zpátky na čtení z DOM a napíše to
+do logu — jen je to méně přesné.
+
+## Když Google změní vzhled: diagnostika
+
+Selektory se hledají **podle textu tlačítek** — stabilní CSS třídy ani testid
+ve Flow nejsou. Každé přejmenování je proto rozbije a zvenčí prohlížeče to
+nikdo neuvidí. Na to je tlačítko **Diagnostika** v panelu.
+
+Uloží dump stránky do `outputs/_diagnostika/dump-<čas>.json`: popisky
+ovládacího pruhu, obsah popoveru s nastavením, názvy zachycených volání, stav
+ladicího rozhraní a posledních pár řádků logu. **Po chybě typu „Nenašel jsem
+tlačítko" se pošle sám.**
+
+```bash
+python -m flowbridge dump
+```
+
+Agentovi ho podá nástroj `flow_diagnostics` — může tedy selektor opravit,
+aniž by kdy viděl tvou obrazovku.
 
 ## Co je ověřené a co ne
 
@@ -212,17 +267,31 @@ spustit buď člověk, nebo nástroj s přístupem k CDP. Řešení do budoucna 
 - interní API Flow — přihlášení, zůstatek kreditů, katalog modelů s cenami,
 - struktura ovládacího panelu: prompt je `contenteditable`, popover s volbami
   Image/Video, poměry 16:9 / 4:3 / 1:1 / 3:4 / 9:16, výběr modelu, počty x1–x4
-  a řádek s cenou v kreditech,
-- syntaxe rozšíření, můstek `/ext/pull` a `/ext/report`, MCP server (9 nástrojů).
+  a řádek s cenou v kreditech.
+
+**Ověřeno testy proti napodobě stránky** (`tests/`, viz níže) — motor fronty,
+dávkování, dopočet chybějících kusů, stahování včetně náhradní cesty, autopilot
+a automatická diagnostika.
 
 **Zatím neověřeno živým během:**
 
-- vlastní odeslání promptu a stažení výsledku rozšířením.
+- že popisky tlačítek a tvar odpovědí ve Flow odpovídají tomu, co selektory
+  a odposlech čekají.
 
 První běh proto pusť s dohledem — obrázky jsou zdarma, takže test nic nestojí.
 Zadej jeden prompt, počet 4, a koukni do logu dole v panelu. Když se některý
-ovládací prvek nenajde, napíše to tam a úloha se označí jako chybná; nic se
-nerozbije.
+ovládací prvek nenajde, napíše to tam, úloha se označí jako chybná a **sama
+uloží diagnostiku**; nic se nerozbije.
+
+## Testy
+
+Motor fronty jede proti napodobě stránky Flow, která se chová podle všeho, co
+je o něm zjištěno naostro (prompt jen přes `beforeinput`, `aria-disabled` na
+tlačítku, popover, důvěryhodné odeslání). Nepotřebuje prohlížeč ani přihlášení.
+
+```bash
+cd tests && npm install && npm test
+```
 
 ---
 
@@ -232,13 +301,16 @@ nerozbije.
 |---|---|
 | panel se neobjevil | jsi na `labs.google/fx/tools/flow`? Obnov stránku (F5) |
 | „Nenašel jsem pole pro prompt" | otevři konkrétní **projekt**, ne úvodní přehled |
-| „Panel s nastavením se neotevřel" | Google změnil vzhled → uprav `popover()` v `content.js` |
-| nestahuje se | zkontroluj v Chrome oprávnění ke stahování pro rozšíření |
+| „Panel s nastavením se neotevřel" | Google změnil vzhled → klikni **Diagnostika** a podle dumpu uprav `popover()` v `content.js` |
+| „odposlech sítě neběží" | načti rozšíření znovu v `chrome://extensions` a obnov stránku — `inject.js` se musí spustit před stránkou |
+| nestahuje se | zkontroluj v Chrome oprávnění ke stahování; se zapnutým můstkem se to zkusí i druhou cestou (uloží to server) |
 | můstek nefunguje | běží `python -m flowbridge dashboard`? Je můstek v panelu na „zap"? |
+| nic se nespustí | `python -m flowbridge status` řekne, jestli se prohlížeč hlásí, je v projektu a co naposled dělal |
 
 Selektory hledají prvky **podle textu**, ne podle CSS tříd, takže drobná změna
-vzhledu Flow je nerozbije. Když Google přejmenuje tlačítka, uprav
-`content.js` — všechno podstatné je v sekci „ovladani Flow".
+vzhledu Flow je nerozbije. Když Google přejmenuje tlačítka, vezmi si dump
+(`python -m flowbridge dump`) a uprav `content.js` — všechno podstatné je
+v sekci „ovladani Flow".
 
 ---
 
@@ -247,8 +319,9 @@ vzhledu Flow je nerozbije. Když Google přejmenuje tlačítka, uprav
 ```
 extension/
     manifest.json   oprávnění a kde se rozšíření spouští
-    content.js      panel + motor fronty + ovládání Flow
-    background.js   stahování a komunikace s můstkem
+    inject.js       odposlech odpovědí Flow (hlavní svět stránky)
+    content.js      panel + motor fronty + ovládání Flow + diagnostika
+    background.js   důvěryhodné odeslání, stahování, komunikace s můstkem
     panel.css       vzhled panelu
 
 flowbridge/         volitelná část pro AI agenty
@@ -257,4 +330,6 @@ flowbridge/         volitelná část pro AI agenty
     mcp_server.py   rozhraní pro agenty
     cli.py          příkazová řádka
     config.py, state.py
+
+tests/              napodoba stránky Flow + test motoru fronty (Node + jsdom)
 ```

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 import re
 import shutil
 from pathlib import Path
@@ -57,6 +58,10 @@ class PauseBody(BaseModel):
     paused: bool
 
 
+class ProjectBody(BaseModel):
+    url: str
+
+
 def _ts(v: float | None) -> str | None:
     return dt.datetime.fromtimestamp(v).strftime("%d.%m. %H:%M:%S") if v else None
 
@@ -86,12 +91,30 @@ def api_state() -> JSONResponse:
             "budget": CFG.monthly_budget,
             "reserve": CFG.credit_reserve,
         },
-        "project": CFG.project_url,
+        "project": state.project_url(),
         "jobs": jobs,
         "events": [{**e, "ts_h": _ts(e["ts"])} for e in db.recent_events(40)],
         "models": db.get_state("model_catalog") or {},
         "ext": db.get_state("ext_status") or {},
+        "last_dump": db.get_state("last_dump"),
     })
+
+
+@app.post("/api/project")
+def api_project(body: ProjectBody) -> dict[str, Any]:
+    """Nastavi adresu projektu ve Flow, do ktereho se ma generovat.
+
+    Rozsireni ji hlasi samo, kdyz uzivatel projekt otevre; tohle je pro pripad,
+    ze ji chce nastavit dopredu nebo z jineho stroje.
+    """
+    db.init()
+    from . import state
+    url = body.url.strip()
+    if url and not url.startswith("https://labs.google/"):
+        raise HTTPException(status_code=400, detail="Čekám adresu projektu na labs.google.")
+    state.set_project_url(url)
+    db.log(f"projekt nastaven: {url or '(žádný)'}")
+    return {"ok": True, "project": url}
 
 
 @app.post("/api/jobs")
@@ -183,7 +206,9 @@ def ext_pull(limit: int = 3) -> dict[str, Any]:
         })
     if out:
         db.log(f"můstek vydal {len(out)} úloh rozšíření")
-    return {"jobs": out, "paused": False}
+    # Adresa projektu jde s sebou, aby rozsireni vedelo, kam ma generovat,
+    # i kdyz zrovna nekouka na spravnou zalozku.
+    return {"jobs": out, "paused": False, "project_url": state.project_url()}
 
 
 class ExtReport(BaseModel):
@@ -244,20 +269,32 @@ def ext_report(body: ExtReport) -> dict[str, Any]:
 SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
 
 
+def _safe_rel(value: str, fallback: str) -> Path:
+    """Z 'kampan/kocka-a1b2' udela bezpecnou relativni cestu.
+
+    Tag nese i podslozku úlohy, takze se lomitko musi zachovat - ale kazdy dil
+    zvlast projde filtrem, aby se z nej nedalo vyskocit ven.
+    """
+    parts = [SAFE_NAME.sub("-", p).strip("-.") for p in str(value).split("/")]
+    parts = [p for p in parts if p and p not in (".", "..")]
+    return Path(*parts) if parts else Path(fallback)
+
+
 @app.post("/ext/upload")
 async def ext_upload(request: Request, tag: str = "default", name: str = "soubor") -> dict[str, Any]:
-    """Prijme hotove medium primo ze stranky Flow a ulozi ho do cilove slozky.
+    """Prijme hotove medium primo od rozsireni a ulozi ho do cilove slozky.
 
-    Média Flow servíruje ze stejné domény, takže je stránka umí stáhnout
-    s přihlášením a poslat sem - odpadá tím obcházení přes Stažené soubory.
+    Nahradni cesta pro pripad, ze chrome.downloads odmitne stahovat (blokovane
+    hromadne stahovani nebo "vzdy se ptat, kam ukladat"). Bajty stahne
+    rozsireni s prihlasenim a posle je rovnou sem - Stazene soubory se obejdou.
     """
     data = await request.body()
     if not data:
         raise HTTPException(status_code=400, detail="prázdné tělo požadavku")
 
-    folder = CFG.outputs_dir / SAFE_NAME.sub("-", tag).strip("-")
+    folder = CFG.outputs_dir / _safe_rel(tag, "default")
     folder.mkdir(parents=True, exist_ok=True)
-    dest = folder / SAFE_NAME.sub("-", name).strip("-")
+    dest = folder / _safe_rel(name, "soubor").name
     if dest.exists():
         dest = dest.with_name(f"{dest.stem}-{int(dt.datetime.now().timestamp())}{dest.suffix}")
     dest.write_bytes(data)
@@ -282,14 +319,65 @@ def ext_log(body: ExtLog) -> dict[str, Any]:
 async def ext_heartbeat(request: Request) -> dict[str, Any]:
     """Rozsireni se hlasi kazdych ~10 s a rovnou rekne, co prave dela."""
     db.init()
-    db.set_state("worker_heartbeat", dt.datetime.now().timestamp())
+    now = dt.datetime.now().timestamp()
+    db.set_state("worker_heartbeat", now)
     try:
         payload = await request.json()
     except Exception:  # noqa: BLE001 - tep bez tela je taky platny
         payload = {}
-    if isinstance(payload, dict) and payload:
+    if not isinstance(payload, dict):
+        payload = {}
+    if payload:
         db.set_state("ext_status", payload)
+
+    # Projekt se nemusi nikam opisovat - rozsireni rekne, ktery ma otevreny.
+    from . import state
+    url = payload.get("projectUrl")
+    if isinstance(url, str) and url.startswith("https://labs.google/") and url != state.project_url():
+        state.set_project_url(url)
+        db.log(f"projekt převzat z prohlížeče: {url}")
+
+    credits = payload.get("credits")
+    if isinstance(credits, int) and not isinstance(credits, bool):
+        db.set_state("credits_balance", credits)
+
+    # Úlohy, které si rozšíření drží, nesmí spadnout mezi "zaseknuté" - velká
+    # dávka klidně běží přes hodinu a znovuvydání by ji vygenerovalo dvakrát.
+    held = [h for h in (payload.get("held") or []) if isinstance(h, str)][:200]
+    if held:
+        marks = ",".join("?" * len(held))
+        with db.db() as conn:
+            conn.execute(
+                f"UPDATE jobs SET started_at = ? WHERE status = ? AND id IN ({marks})",
+                (now, db.RUNNING, *held),
+            )
     return {"ok": True}
+
+
+@app.post("/ext/dump")
+async def ext_dump(request: Request) -> dict[str, Any]:
+    """Ulozi dump stranky Flow, ktery poslalo rozsireni.
+
+    Selektory se ve Flow hledaji podle textu tlacitek - jina cesta neni, stabilni
+    tridy ani testid tam nejsou. Kazda zmena vzhledu je proto rozbije a zvenci
+    prohlizece to nikdo neuvidi. Tohle je jediny zpusob, jak se stav stranky
+    dostane do souboru, ktery jde poslat dal.
+    """
+    db.init()
+    try:
+        payload = await request.json()
+    except Exception:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail="Čekám JSON.") from None
+
+    folder = CFG.outputs_dir / "_diagnostika"
+    folder.mkdir(parents=True, exist_ok=True)
+    dest = folder / f"dump-{dt.datetime.now():%Y%m%d-%H%M%S}.json"
+    dest.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    db.set_state("last_dump", str(dest))
+    duvod = payload.get("duvod", "?") if isinstance(payload, dict) else "?"
+    db.log(f"diagnostika uložena: {dest.name} ({duvod})", level="warn")
+    return {"ok": True, "path": str(dest)}
 
 
 @app.get("/file")
@@ -362,6 +450,7 @@ PAGE = """<!doctype html>
   <span class="pill" id="p-worker">worker …</span>
   <span class="pill" id="p-queue">fronta …</span>
   <span class="pill" id="p-credits">kredity …</span>
+  <span class="pill" id="p-ext">prohlížeč …</span>
   <button class="ghost" id="btn-pause">pozastavit</button>
   <a class="pill" id="p-project" href="#" target="_blank">projekt ve Flow</a>
 </header>
@@ -377,6 +466,13 @@ PAGE = """<!doctype html>
   </div>
 
   <div>
+    <div class="card" style="margin-bottom:16px">
+      <h2>Projekt ve Flow</h2>
+      <input id="f-project" placeholder="https://labs.google/fx/tools/flow/project/…">
+      <div style="margin-top:8px"><button class="ghost" id="btn-project">uložit projekt</button></div>
+      <div id="ext-info" style="margin-top:10px;font-size:11.5px;color:#8b8b93;line-height:1.7"></div>
+    </div>
+
     <div class="card">
       <h2>Nový prompt</h2>
       <textarea id="f-prompt" placeholder="Co se má vygenerovat…"></textarea>
@@ -428,6 +524,26 @@ async function refresh(){
   $('#p-credits').innerHTML = 'kredity <b>' + (cr.balance ?? '?') + '</b> · měsíc <b>' +
     cr.spent + '/' + cr.budget + '</b>';
   if (st.project) $('#p-project').href = st.project;
+  const pf = $('#f-project');
+  if (document.activeElement !== pf) pf.value = st.project || '';
+
+  // Co hlásí rozšíření v prohlížeči - bez tohohle člověk netuší, proč fronta stojí.
+  const e = st.ext || {};
+  const zije = st.worker.running;
+  $('#p-ext').innerHTML = 'prohlížeč <b>' +
+    (!zije ? 'neozývá se' : e.running ? 'generuje' : 'čeká') + '</b>' +
+    (zije && e.autopilot === false ? ' · autopilot vyp' : '');
+  const radek = (k, v) => '<div>' + k + ': <span style="color:#e8e8ea">' + esc(String(v)) + '</span></div>';
+  $('#ext-info').innerHTML = !zije
+    ? 'Rozšíření se neozvalo. Otevři projekt ve Flow a v panelu zapni <b>Můstek</b>.'
+    : radek('v projektu', e.project ? 'ano' : 'ne – otevři projekt') +
+      radek('odposlech sítě', e.odposlech ? 'běží' : 'NEBĚŽÍ – načti rozšíření znovu') +
+      radek('ladicí rozhraní', e.umiLadit === false
+        ? 'chybí oprávnění debugger' : (e.chybaLadeni || 'ok')) +
+      radek('fronta v prohlížeči', (e.queued ?? 0) + ' čeká, ' + (e.done ?? 0) +
+        ' hotovo, ' + (e.failed ?? 0) + ' chyb') +
+      (e.lastLog ? radek('naposled', e.lastLog) : '') +
+      (st.last_dump ? radek('diagnostika', st.last_dump) : '');
 
   const names = new Set();
   for (const k of Object.keys(st.models||{}))
@@ -469,6 +585,13 @@ async function act(id, what){
 $('#btn-pause').onclick = async () => {
   await fetch('/api/pause', {method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({paused: !paused})});
+  refresh();
+};
+
+$('#btn-project').onclick = async () => {
+  const r = await fetch('/api/project', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({url: $('#f-project').value.trim()})});
+  if (!r.ok) alert((await r.json()).detail || 'nepovedlo se');
   refresh();
 };
 

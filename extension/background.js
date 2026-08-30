@@ -18,6 +18,12 @@ async function ensureInjected(tabId) {
     return true;
   } catch {
     try {
+      // Odposlech site musi do hlavniho sveta stranky, panel do izolovaneho.
+      // Do uz nactene stranky prijde pozde, takze zachyti jen dalsi volani -
+      // proto se stejny soubor vklada i deklarativne na document_start.
+      await chrome.scripting.executeScript({
+        target: { tabId }, files: ["inject.js"], world: "MAIN",
+      });
       await chrome.scripting.insertCSS({ target: { tabId }, files: ["panel.css"] });
       await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
       return true;
@@ -123,14 +129,16 @@ async function trustedClick(tabId, x, y) {
   if (!(await ensureDebugger(tabId))) {
     return { ok: false, error: lastAttachError || "nepodařilo se připojit ladicí rozhraní" };
   }
-  const base = { x, y, button: "left", clickCount: 1 };
+  const base = { x, y, button: "left", clickCount: 1, pointerType: "mouse" };
   try {
+    // React vetsinou reaguje uz na pointerdown, ale nektera tlacitka cekaji na
+    // cely cyklus. Posilame proto pohyb -> stisk -> uvolneni, jako mys.
     await chrome.debugger.sendCommand({ tabId }, "Input.dispatchMouseEvent",
-      { type: "mouseMoved", x, y });
+      { type: "mouseMoved", x, y, buttons: 0, pointerType: "mouse" });
     await chrome.debugger.sendCommand({ tabId }, "Input.dispatchMouseEvent",
-      { type: "mousePressed", ...base });
+      { type: "mousePressed", ...base, buttons: 1 });
     await chrome.debugger.sendCommand({ tabId }, "Input.dispatchMouseEvent",
-      { type: "mouseReleased", ...base });
+      { type: "mouseReleased", ...base, buttons: 0 });
     return { ok: true };
   } catch (e) {
     return { ok: false, error: String(e?.message || e) };
@@ -203,6 +211,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  if (msg?.type === "bridgeDump") {
+    bridgePost(msg.url, "/ext/dump", msg.payload || {}).then(sendResponse);
+    return true;
+  }
+
+  if (msg?.type === "uploadToBridge") {
+    fetchAndUpload(msg.bridgeUrl, msg.url, msg.tag, msg.name).then(sendResponse);
+    return true;
+  }
+
   return false;
 });
 
@@ -264,6 +282,35 @@ async function bridgeGet(baseUrl, path) {
     return { ok: true, ...(await r.json()) };
   } catch (e) {
     return { ok: false, error: String(e.message || e) };
+  }
+}
+
+/* Nahradni cesta ke stazeni.
+ *
+ * chrome.downloads umi ulozit jen do slozky Stazene soubory a obcas ho zastavi
+ * nastaveni prohlizece (napr. "vzdy se ptat, kam ukladat"). Kdyz selze, stahne
+ * soubor rovnou service worker a posle bajty mustku, ktery je ulozi do cilove
+ * slozky. Rozsireni ma na obe domeny opravneni, takze ho CORS nebrzdi. */
+async function fetchAndUpload(bridgeUrl, url, tag, name) {
+  if (!bridgeUrl) return { ok: false, error: "můstek není zapnutý" };
+  try {
+    const r = await fetch(url, { credentials: "include", cache: "no-store" });
+    if (!r.ok) return { ok: false, error: "zdroj HTTP " + r.status };
+    const blob = await r.blob();
+    if (!blob.size) return { ok: false, error: "prázdný soubor" };
+    const dest =
+      bridgeUrl.replace(/\/$/, "") +
+      "/ext/upload?tag=" + encodeURIComponent(tag || "default") +
+      "&name=" + encodeURIComponent(name || "soubor");
+    const up = await fetch(dest, {
+      method: "POST",
+      headers: { "Content-Type": "application/octet-stream" },
+      body: blob,
+    });
+    if (!up.ok) return { ok: false, error: "můstek HTTP " + up.status };
+    return { ok: true, ...(await up.json()) };
+  } catch (e) {
+    return { ok: false, error: String(e?.message || e) };
   }
 }
 

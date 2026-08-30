@@ -5,3 +5,5 @@ flowbridge.db-wal
 flowbridge.db-shm
 outputs/
 jobs-logo.json
+tests/node_modules/
+tests/package-lock.json

@@ -28,17 +28,84 @@
       maxCreditsPerJob: 60,
       bridgeUrl: "http://127.0.0.1:8765",
       bridgeEnabled: true,
+      autopilot: true,
       collapsed: false,
       projectUrl: "",
     },
   };
 
   let state = structuredClone(DEFAULTS);
-  let loopHandle = null;
   let busy = false;
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const nowId = () => Math.random().toString(36).slice(2, 10);
+
+  /* Kdyz service worker uspal nebo neodpovi, sendMessage muze viset navzdy.
+     Vsude, kde se na odpoved ceka uprostred davky, jde o zaseknuty beh. */
+  function withTimeout(promise, ms, fallback) {
+    return Promise.race([
+      Promise.resolve(promise).catch((e) => ({ ok: false, error: String(e?.message || e) })),
+      sleep(ms).then(() => fallback),
+    ]);
+  }
+
+  // -------------------------------------------------------------------------
+  // co videl odposlech site (inject.js bezi v hlavnim svete stranky)
+  //
+  // Z DOM se hotova media ctou spatne - seznam je virtualizovany a v <img> je
+  // zmenseny nahled. Odpoved z /fx/api/trpc ma plne adresy a navic je jedinym
+  // spolehlivym dukazem, ze Flow odeslani prijal.
+  // -------------------------------------------------------------------------
+
+  const netMedia = [];       // {url, isVideo, ts}
+  const netMediaSeen = new Set();
+  const netCalls = [];       // {name, method, status, ts} - nejnovejsi prvni
+  let netReady = false;
+  let lastGenerateTs = 0;  // volani, ktere urcite spustilo generovani
+  let lastPostTs = 0;      // jakykoliv zapis do Flow - slabsi, ale nekdy jediny
+  let creditBalance = null;
+
+  /* Nazvy volani, ktera znamenaji "generovani zacalo". Zamerne siroke - kdyz
+     Google neco prejmenuje, poznas to z diagnostiky (netCalls) a doplnis sem. */
+  const GENERATE_CALL = /generate|createMedia|runWorkflow|submitWorkflow|textToImage|textToVideo|imageFx|videoFx|createScene|expandPrompt/i;
+
+  window.addEventListener("message", (ev) => {
+    if (ev.source !== window || ev.origin !== location.origin) return;
+    const p = ev.data && ev.data.__fbNet;
+    if (!p) return;
+
+    netReady = true; // cokoliv od odposlechu = bezi
+    if (p.kind === "ready") {
+      /* jen ohlaseni */
+    } else if (p.kind === "media") {
+      const ts = Date.now();
+      for (const it of p.items || []) {
+        if (netMediaSeen.has(it.url)) continue;
+        netMediaSeen.add(it.url);
+        netMedia.push({ url: it.url, isVideo: !!it.isVideo, ts });
+      }
+      if (netMedia.length > 4000) netMedia.splice(0, netMedia.length - 4000);
+    } else if (p.kind === "call") {
+      netCalls.unshift({ name: p.name, method: p.method, status: p.status, ts: p.ts });
+      if (netCalls.length > 80) netCalls.length = 80;
+      if (p.method === "POST" && p.ok) {
+        lastPostTs = p.ts || Date.now();
+        if (GENERATE_CALL.test(p.name || "")) lastGenerateTs = lastPostTs;
+      }
+    } else if (p.kind === "credits") {
+      creditBalance = p.value;
+    }
+  });
+
+  /* Media, ktera odposlech zachytil od daneho okamziku.
+     U videa se prednostne berou skutecna videa - Flow k nim posila i nahledovy
+     obrazek. Kdyz se ale zadne video nerozpozna (treba proto, ze adresa je
+     podepsana a nekonci na .mp4), vratime radeji vsechno nez nic. */
+  function mediaSince(ts, wantVideo) {
+    const vse = netMedia.filter((m) => m.ts >= ts);
+    const videa = wantVideo ? vse.filter((m) => m.isVideo) : null;
+    return (videa && videa.length ? videa : vse).map((m) => m.url);
+  }
 
   // -------------------------------------------------------------------------
   // stav
@@ -185,23 +252,50 @@
     return !!s && s.getAttribute("aria-disabled") !== "true" && !s.disabled;
   }
 
+  const editorText = (ed) =>
+    (ed.innerText || ed.textContent || "").replace(/​/g, "").trim();
+
+  /* Bez kurzoru na konci by mazani po znaku zacalo uprostred textu. */
+  function caretToEnd(ed) {
+    try {
+      const r = document.createRange();
+      r.selectNodeContents(ed);
+      r.collapse(false);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(r);
+    } catch {
+      /* nevadi, jen pojistka */
+    }
+  }
+
   async function setPrompt(text) {
     const ed = editor();
     if (!ed) throw new Error("Nenašel jsem pole pro prompt. Jsi na stránce projektu Flow?");
     // Flow cte jen udalost beforeinput; execCommand ani zapis do DOM neregistruje.
     for (let pokus = 1; pokus <= 4; pokus++) {
       ed.focus();
-      for (let i = 0; i < 900; i++) {
+      caretToEnd(ed);
+      // Vyber textu Flow ignoruje, takze se maze po znaku. Pocet se ridi tim,
+      // co v poli opravdu je - 900 udalosti nasucho zbytecne brzdilo stranku.
+      const kolik = Math.min(4000, editorText(ed).length + 40);
+      for (let i = 0; i < kolik; i++) {
         ed.dispatchEvent(new InputEvent("beforeinput", {
           inputType: "deleteContentBackward", bubbles: true, cancelable: true, composed: true }));
       }
       await sleep(200);
       ed.dispatchEvent(new InputEvent("beforeinput", {
         inputType: "insertText", data: text, bubbles: true, cancelable: true, composed: true }));
-      await sleep(600);
-      if (submitReady()) return;
+      await sleep(550);
+      if (submitReady()) {
+        const got = editorText(ed);
+        if (got && !got.includes(text.slice(0, 20))) {
+          log("v poli je něco jiného, než jsem psal - posílám to tak, jak to Flow vzalo", "warn");
+        }
+        return;
+      }
     }
-    throw new Error("Flow prompt nepřijal.");
+    throw new Error("Flow prompt nepřijal (odeslat zůstalo neaktivní).");
   }
 
   async function openSettings() {
@@ -280,17 +374,20 @@
       await selectModel(pop, job.model);
       pop = popover() || pop;
     }
-    if (job.kind === "video") {
-      if (job.duration) {
-        clickIn(pop, job.duration + "s");
-        await sleep(250);
-        pop = popover() || pop;
-      }
-    } else {
-      if (!clickIn(pop, "x" + count)) log(`nešlo nastavit počet x${count}`, "warn");
+    if (job.kind === "video" && job.duration) {
+      clickIn(pop, job.duration + "s");
       await sleep(250);
       pop = popover() || pop;
     }
+
+    // Počet se musí nastavit VŽDY, i u videa. Popover si drží, co bylo vybrané
+    // naposledy - kdyby po obrázkové úloze s x4 přišlo video, Flow by udělalo
+    // čtyři videa místo jednoho a strhlo čtyřnásobek kreditů.
+    if (!clickIn(pop, "x" + count) && job.kind !== "video") {
+      log(`nešlo nastavit počet x${count}`, "warn");
+    }
+    await sleep(250);
+    pop = popover() || pop;
 
     const est = creditEstimate(pop);
     await closeSettings();
@@ -299,30 +396,76 @@
 
   /* Flow spusti generovani jen na skutecnou udalost od uzivatele.
      Syntetický klik ani syntetický Enter neprojdou - proto to jde pres
-     ladici rozhrani prohlizece (viz background.js). */
+     ladici rozhrani prohlizece (viz background.js).
+
+     Kdyz je na karte pripojeny jiny ladici nastroj, attach se nevrati vubec -
+     bez limitu by smycka visela navzdy. */
+  const LADENI_NEODPOVEDELO = {
+    ok: false,
+    error: "ladicí rozhraní neodpovědělo - je na kartě otevřený jiný ladicí nástroj?",
+  };
+
+  /* Vraci, cim se odeslani potvrdilo, nebo null. Poradi podle spolehlivosti:
+     zachycene volani na generovani > vyprazdnene pole > ukazatel prubehu >
+     jakykoliv zapis do Flow.
+
+     Posledni signal je zamerne mekky. Kdyz Google prejmenuje volani, prestane
+     sedet GENERATE_CALL a bez teto pojistky by se prompt poslal podruhe -
+     u videa je to utracene kredity. Falesne potvrzeni je levnejsi: dávka jen
+     nic nevrati a zopakuje se. */
+  async function odeslaniPotvrzeno(od, limitMs) {
+    const konec = Date.now() + limitMs;
+    while (Date.now() < konec) {
+      await sleep(300);
+      if (lastGenerateTs >= od) return "síť";
+      if (!submitReady()) return "pole se vyprázdnilo";
+      if (document.querySelector('[role="progressbar"]')) return "průběh";
+      if (lastPostTs >= od + 500) return "zápis do Flow";
+    }
+    return null;
+  }
+
   async function submit() {
-    if (!submitButton()) throw new Error("Nenašel jsem tlačítko odeslat.");
+    const btn = submitButton();
+    if (!btn) throw new Error("Nenašel jsem tlačítko odeslat.");
     if (!submitReady()) throw new Error("Flow prompt nepřevzal (odeslat je neaktivní).");
 
+    const od = Date.now();
     const ed = editor();
     if (ed) ed.focus();
 
-    // Kdyz je na karte pripojeny jiny ladici nastroj, attach se nevrati vubec -
-    // bez limitu by tu smycka visela navzdy.
-    const res = await Promise.race([
-      chrome.runtime.sendMessage({ type: "trustedEnter" }),
-      sleep(8000).then(() => ({
-        ok: false,
-        error: "ladicí rozhraní neodpovědělo - je na kartě otevřený jiný ladicí nástroj?",
-      })),
-    ]);
+    // 1) duveryhodny klik presne na sipku - to same, co dela clovek
+    const r = btn.getBoundingClientRect();
+    if (r.width && r.height) {
+      const res = await withTimeout(
+        chrome.runtime.sendMessage({
+          type: "trustedClick",
+          x: Math.round(r.left + r.width / 2),
+          y: Math.round(r.top + r.height / 2),
+        }),
+        8000,
+        LADENI_NEODPOVEDELO
+      );
+      if (!res?.ok) {
+        log(`klik na odeslat neprošel: ${res?.error}`, "warn");
+      } else {
+        // Kdyz bezi odposlech, mame tvrdy dukaz a staci kratke okno. Bez nej
+        // se hada podle vzhledu - pak radeji kratce, at nasleduje Enter.
+        const jak = await odeslaniPotvrzeno(od, netReady ? 7000 : 4000);
+        if (jak) return jak;
+      }
+    }
+
+    // 2) nahradni cesta - duveryhodny Enter v poli s promptem
+    if (!submitReady()) return "pole se vyprázdnilo";
+    if (ed) ed.focus();
+    const res = await withTimeout(
+      chrome.runtime.sendMessage({ type: "trustedEnter" }), 8000, LADENI_NEODPOVEDELO
+    );
     if (!res?.ok) throw new Error(res?.error || "odeslání selhalo");
 
-    // Kdyz se pole vyprazdnilo, Flow prompt prevzal.
-    for (let i = 0; i < 12; i++) {
-      await sleep(400);
-      if (!submitReady()) return;
-    }
+    const jak = await odeslaniPotvrzeno(od, 12000);
+    if (jak) return jak;
     throw new Error("Flow na odeslání nezareagoval");
   }
 
@@ -346,24 +489,36 @@
     return /Generating|Generuji/i.test(document.body.innerText || "");
   }
 
-  async function waitForNewMedia(before, expected, onTick) {
+  /* od       = cas tesne pred odeslanim (media starsi nas nezajimaji)
+     beforeDom = co bylo videt ve strance pred odeslanim (zaloha, kdyz
+                 odposlech nic nechyti - treba po zmene struktury odpovedi) */
+  async function waitForNewMedia(od, beforeDom, expected, wantVideo, onTick) {
     const timeout = state.settings.waitTimeoutSeconds * 1000;
     const started = Date.now();
     let lastChange = started;
     const found = [];
 
+    const add = (url) => {
+      if (found.includes(url)) return;
+      found.push(url);
+      lastChange = Date.now();
+    };
+    const zeSite = () => mediaSince(od, wantVideo);
+
     while (Date.now() - started < timeout) {
       await sleep(2000);
       if (!state.running) break;
-      for (const url of mediaSnapshot()) {
-        if (!before.has(url) && !found.includes(url)) {
-          found.push(url);
-          lastChange = Date.now();
-        }
+
+      for (const url of zeSite()) add(url);
+      // Odposlech je presnejsi, ale kdyz mlci, bereme aspon to, co je videt.
+      if (!netReady || !found.length) {
+        for (const url of mediaSnapshot()) if (!beforeDom.has(url)) add(url);
       }
+
       if (onTick) onTick(found.length);
       if (found.length >= expected) {
         await sleep(1500);
+        for (const url of zeSite()) add(url); // dober, co dorazilo tesne potom
         return found;
       }
       if (!isBusy() && Date.now() - lastChange > 25000 && found.length) return found;
@@ -400,24 +555,49 @@
     return String(part).replace(/[<>:"/\\|?*\x00-\x1f]/g, "-");
   }
 
-  async function downloadOne(url, filename) {
-    const res = await chrome.runtime.sendMessage({
-      type: "download",
-      url: fullSize(url),
-      filename,
-    });
-    if (!res?.ok) throw new Error(res?.error || "stažení selhalo");
+  const jobFolder = (job) =>
+    `${safe(job.tag || "default")}/${safe(slug(job.prompt))}-${job.id}`;
+
+  async function downloadOne(url, filename, job) {
+    const res = await withTimeout(
+      chrome.runtime.sendMessage({ type: "download", url: fullSize(url), filename }),
+      200000,
+      { ok: false, error: "stahování neodpovědělo" }
+    );
     // absolutni cesta, aby mustek mohl soubor presunout na Plochu
-    return res.path || filename;
+    if (res?.ok) return res.path || filename;
+
+    // Nahradni cesta: kdyz chrome.downloads odmitne (blokovane hromadne
+    // stahovani, "vzdy se ptat kam ukladat"), stahne bajty samo rozsireni
+    // a posle je mustku, ktery je ulozi rovnou do cilove slozky.
+    if (state.settings.bridgeEnabled) {
+      const up = await withTimeout(
+        chrome.runtime.sendMessage({
+          type: "uploadToBridge",
+          bridgeUrl: state.settings.bridgeUrl,
+          url: fullSize(url),
+          tag: jobFolder(job),
+          name: filename.split("/").pop(),
+        }),
+        120000,
+        { ok: false, error: "můstek neodpověděl" }
+      );
+      if (up?.ok && up.path) {
+        log("prohlížeč stahování odmítl, uložil to můstek", "warn");
+        return up.path;
+      }
+      throw new Error(`${res?.error || "stažení selhalo"} / můstek: ${up?.error || "?"}`);
+    }
+    throw new Error(res?.error || "stažení selhalo");
   }
 
   async function downloadAll(job, urls) {
-    const dir = `FlowBridge/${safe(job.tag || "default")}/${safe(slug(job.prompt))}-${job.id}`;
+    const dir = `FlowBridge/${jobFolder(job)}`;
     const ext = job.kind === "video" ? "mp4" : "png";
     for (const url of urls) {
       const n = String(job.done.length + 1).padStart(3, "0");
       try {
-        const name = await downloadOne(url, `${dir}/${n}.${ext}`);
+        const name = await downloadOne(url, `${dir}/${n}.${ext}`, job);
         job.done.push(name);
       } catch (e) {
         log(`stažení selhalo: ${e.message}`, "warn");
@@ -479,7 +659,8 @@
     while (job.done.length < job.count && state.running) {
       const remaining = job.count - job.done.length;
       const wave = planWave(remaining, per, maxB);
-      const before = mediaSnapshot();
+      const beforeDom = mediaSnapshot();
+      const od = Date.now();
       let submitted = 0;
 
       for (const size of wave) {
@@ -490,10 +671,10 @@
           if (job.kind === "video" && est != null && est > state.settings.maxCreditsPerJob) {
             throw new Error(`odhad ${est} kr. překračuje strop ${state.settings.maxCreditsPerJob} kr.`);
           }
-          await submit();
+          const jak = await submit();
           submitted += size;
           if (est) job.credits = (job.credits || 0) + est;
-          log(`odesláno ${size} ks${est != null ? ` (${est} kr.)` : ""}`);
+          log(`odesláno ${size} ks${est != null ? ` (${est} kr.)` : ""} · potvrzeno: ${jak}`);
         } catch (e) {
           // jedna davka neprosla - zbytek vlny jede dal, chybejici kusy
           // se dopočítají v dalším kole
@@ -513,7 +694,7 @@
       log(`čekám na ${submitted} výsledků...`);
       let urls = [];
       try {
-        urls = await waitForNewMedia(before, submitted, (n) => {
+        urls = await waitForNewMedia(od, beforeDom, submitted, job.kind === "video", (n) => {
           job.progress = n;
           render();
         });
@@ -568,6 +749,8 @@
     return /Application error|client-side exception/i.test(document.body.innerText || "");
   }
 
+  let nacteno = false; // uz jsme pockali na prvni prival dat po nacteni?
+
   /* Pocitadlo obnoveni musi prezit reload, takze zije ve stavu, ne v promenne. */
   async function zajistiProjekt() {
     if (naProjektu()) {
@@ -582,6 +765,13 @@
           if (state.recovery) {
             state.recovery = 0;
             save();
+          }
+          // Po nacteni si Flow stahne seznam vseho, co uz v projektu je.
+          // Kdybychom zaroven odeslali prompt, spletli bychom si starsi media
+          // s cerstvymi - proto se necha tenhle prvni prival dobehnout.
+          if (!nacteno) {
+            nacteno = true;
+            await sleep(5000);
           }
           return true;
         }
@@ -634,6 +824,12 @@
           job.status = "failed";
           job.error = String(e.message || e);
           log(`úloha selhala: ${job.error}`, "error");
+          pushToBridge(job);
+          // Chyby typu "nenasel jsem tlacitko" znamenaji, ze Flow zmenil vzhled.
+          // Bez dumpu stranky se to zvenku nedá opravit, tak ho posleme rovnou.
+          if (POTREBA_DIAGNOSTIKA.test(job.error)) {
+            posliDump(`po chybě úlohy: ${job.error}`).catch(() => {});
+          }
         }
         save();
         render();
@@ -681,13 +877,23 @@
         payload: {
           umiLadit: diag?.umiLadit ?? null,
           chybaLadeni: diag?.posledniChyba || "",
+          odposlech: netReady,
           running: state.running,
+          autopilot: !!state.settings.autopilot,
           busy,
           queued: state.jobs.filter((j) => j.status === "queued").length,
           done: state.jobs.filter((j) => j.status === "done").length,
           failed: state.jobs.filter((j) => j.status === "failed").length,
           lastLog: state.log[0]?.msg || "",
-          project: location.pathname.includes("/project/"),
+          project: naProjektu(),
+          // Adresu projektu si mustek zapamatuje, aby ji znal dashboard i agenti.
+          projectUrl: naProjektu() ? location.href : null,
+          credits: creditBalance,
+          // Ulohy, ktere prave drzime - mustek jim posune casovac, aby si je
+          // po 45 minutach nevzal zpatky jako zaseknute.
+          held: state.jobs
+            .filter((j) => j.bridgeId && j.status !== "done" && j.status !== "failed")
+            .map((j) => j.bridgeId),
         },
       });
       const res = await chrome.runtime.sendMessage({
@@ -695,6 +901,11 @@
         url: state.settings.bridgeUrl,
       });
       if (!res?.ok) return "down";
+      // Kdyz mustek zna adresu projektu a my v zadnem nejsme, prejdeme do nej.
+      if (res.project_url && !state.settings.projectUrl) {
+        state.settings.projectUrl = res.project_url;
+        save();
+      }
       if (!Array.isArray(res.jobs) || !res.jobs.length) return "empty";
       let added = 0;
       for (const j of res.jobs) {
@@ -716,12 +927,19 @@
         added++;
       }
       if (added) {
-        log(
-          `z můstku přibylo ${added} úloh od agentů` +
-            (state.running ? "" : " - klikni Spustit")
-        );
         save();
         render();
+        // Autopilot: prompty od agentů se maji odbavit samy, i kdyz u toho
+        // nikdo nesedi. To je cely smysl mustku.
+        if (state.settings.autopilot && !state.running) {
+          log(`z můstku přibylo ${added} úloh od agentů - spouštím`);
+          start();
+        } else {
+          log(
+            `z můstku přibylo ${added} úloh od agentů` +
+              (state.running ? "" : " - klikni Spustit")
+          );
+        }
       }
       return added ? `${added} úloh` : "empty";
     } catch {
@@ -745,6 +963,117 @@
       });
     } catch {
       /* nevadi */
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // diagnostika (dump stranky)
+  //
+  // Flow nema stabilni CSS tridy ani testid, takze se vsechno hleda podle
+  // textu. Kdyz Google neco prejmenuje, prestane sedet jediny selektor a
+  // zvenci to nikdo neuvidi. Tenhle dump vytahne presne to, co je k oprave
+  // potreba - popisky tlacitek, obsah popoveru a nazvy sitovych volani -
+  // a posle ho mustku, ktery ho ulozi do souboru.
+  // -------------------------------------------------------------------------
+
+  const POTREBA_DIAGNOSTIKA =
+    /Nenašel jsem|neotevřel|nepřijal|nepřevzal|nezareagoval|nepodařilo|nepřibylo/i;
+
+  let dumpBezi = false;
+
+  function popisPrvku(el) {
+    const r = el.getBoundingClientRect();
+    return {
+      tag: el.tagName.toLowerCase(),
+      role: el.getAttribute("role") || null,
+      text: norm(el).slice(0, 120),
+      aria: el.getAttribute("aria-label") || null,
+      disabled: el.getAttribute("aria-disabled") === "true" || !!el.disabled,
+      rect: [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)],
+    };
+  }
+
+  async function sbirejDump(duvod) {
+    const ed = editor();
+    const b = bar();
+    const sb = submitButton();
+    const dump = {
+      duvod: duvod || "ruční",
+      cas: new Date().toISOString(),
+      url: location.href,
+      titulek: document.title,
+      verze: chrome.runtime.getManifest().version,
+      naProjektu: naProjektu(),
+      spadlo: strankaSpadla(),
+      generuje: isBusy(),
+      odmitnuti: refusalNote(),
+      odposlech: {
+        bezi: netReady,
+        medii: netMedia.length,
+        posledniGenerovani: lastGenerateTs || null,
+      },
+      kredity: creditBalance,
+      editor: ed ? popisPrvku(ed) : null,
+      editorText: ed ? editorText(ed).slice(0, 200) : null,
+      pruh: b ? [...b.querySelectorAll("button")].map(popisPrvku) : null,
+      odeslat: sb ? { ...popisPrvku(sb), pripraveno: submitReady() } : null,
+      popover: null,
+      volani: netCalls.slice(0, 40),
+      posledniMedia: netMedia.slice(-6).map((m) => ({
+        url: m.url.slice(0, 200), video: m.isVideo,
+      })),
+      log: state.log.slice(0, 25),
+      // Vlastni panel z textu stranky vynechavame - jinak by dump obsahoval
+      // hlavne svuj vlastni log a to podstatne by se v nem ztratilo.
+      text: [...document.body.children]
+        .filter((el) => el.id !== "flowbridge-panel")
+        .map((el) => el.innerText || "")
+        .join("\n")
+        .slice(0, 3000),
+    };
+
+    // Popover se musi otevrit, jinak jeho obsah v DOM vubec neni.
+    try {
+      const pop = await openSettings();
+      dump.popover = {
+        text: (pop.innerText || "").slice(0, 1500),
+        tlacitka: [...pop.querySelectorAll(CLICKABLE)].map(popisPrvku).slice(0, 60),
+        odhadKreditu: creditEstimate(pop),
+      };
+      await closeSettings();
+    } catch (e) {
+      dump.popover = { chyba: String(e.message || e) };
+    }
+
+    dump.ladeni = await withTimeout(
+      chrome.runtime.sendMessage({ type: "diag" }), 4000,
+      { chyba: "service worker neodpověděl" }
+    );
+    return dump;
+  }
+
+  async function posliDump(duvod) {
+    if (dumpBezi) return null;
+    dumpBezi = true;
+    try {
+      const dump = await sbirejDump(duvod);
+      console.log("[FlowBridge] dump stránky", dump); // pojistka, kdyz mustek nebezi
+      if (!state.settings.bridgeEnabled) {
+        log("diagnostika je v konzoli (F12) – můstek je vypnutý", "warn");
+        return dump;
+      }
+      const res = await withTimeout(
+        chrome.runtime.sendMessage({
+          type: "bridgeDump", url: state.settings.bridgeUrl, payload: dump,
+        }),
+        10000,
+        { ok: false, error: "můstek neodpověděl" }
+      );
+      if (res?.ok) log(`diagnostika uložena: ${res.path || "můstek"}`);
+      else log(`diagnostiku se nepodařilo odeslat: ${res?.error} – je v konzoli (F12)`, "warn");
+      return dump;
+    } finally {
+      dumpBezi = false;
     }
   }
 
@@ -823,6 +1152,10 @@
           <button class="fb-ghost" id="fb-clear">Uklidit hotové</button>
           <button class="fb-ghost" id="fb-bridge">Můstek: vyp</button>
         </div>
+        <div class="fb-row" style="margin-top:6px">
+          <button class="fb-ghost" id="fb-auto" title="sám spustí frontu, jakmile přibude úloha">Autopilot: zap</button>
+          <button class="fb-ghost" id="fb-dump" title="uloží stav stránky pro opravu selektorů">Diagnostika</button>
+        </div>
         <div class="fb-log" id="fb-log"></div>
       </div>`;
     document.body.appendChild(panel);
@@ -848,6 +1181,21 @@
       save();
       render();
     };
+    panel.querySelector("#fb-auto").onclick = () => {
+      state.settings.autopilot = !state.settings.autopilot;
+      save();
+      render();
+      log(state.settings.autopilot
+        ? "autopilot zapnut - nové úlohy se spustí samy"
+        : "autopilot vypnut - frontu spouštíš ručně");
+      if (state.settings.autopilot && !state.running && nextJob()) start();
+    };
+
+    panel.querySelector("#fb-dump").onclick = async () => {
+      log("sbírám diagnostiku...");
+      await posliDump("ruční");
+    };
+
     panel.querySelector("#fb-bridge").onclick = async () => {
       state.settings.bridgeEnabled = !state.settings.bridgeEnabled;
       save();
@@ -899,6 +1247,7 @@
     log(`přidáno ${prompts.length} úloh`);
     save();
     render();
+    if (state.settings.autopilot && !state.running) start();
   }
 
   function makeDraggable(el, handle) {
@@ -931,6 +1280,8 @@
     panel.querySelector("#fb-run").textContent = state.running ? "Zastavit" : "Spustit";
     panel.querySelector("#fb-bridge").textContent =
       "Můstek: " + (state.settings.bridgeEnabled ? "zap" : "vyp");
+    panel.querySelector("#fb-auto").textContent =
+      "Autopilot: " + (state.settings.autopilot ? "zap" : "vyp");
 
     const jobs = [...state.jobs].sort((a, b) => {
       const order = { running: 0, queued: 1, failed: 2, done: 3 };
@@ -1014,17 +1365,31 @@
 
   (async function init() {
     await load();
+    // inject.js bezi uz od document_start, takze jeho ohlaseni jsme nemohli
+    // slyset - znacku v DOM ale ano.
+    if (document.documentElement.getAttribute("data-fb-net") === "1") netReady = true;
+
     buildPanel();
     render();
-    if (location.pathname.includes("/fx/tools/flow/project/")) {
+    if (naProjektu()) {
       state.settings.projectUrl = location.href;
       save();
     }
-    log("panel připraven");
+    log(`panel připraven${netReady ? "" : " (odposlech sítě neběží - načti rozšíření znovu)"}`);
+
     // mustek se pta na ulohy nezavisle na tom, jestli fronta zrovna bezi
     setInterval(() => {
       if (state.settings.bridgeEnabled) bridgeTick();
     }, 10000);
-    if (state.running) loop();
+    if (state.settings.bridgeEnabled) bridgeTick(true);
+
+    // Beh prezije obnoveni stranky i zavreni prohlizece. S autopilotem staci,
+    // ze ve fronte neco ceka - proto se nic nemusi klikat.
+    if (state.running || (state.settings.autopilot && nextJob())) {
+      state.running = true;
+      save();
+      render();
+      loop();
+    }
   })();
 })();

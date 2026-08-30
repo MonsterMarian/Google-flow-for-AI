@@ -162,20 +162,64 @@ def cmd_status(args: argparse.Namespace) -> None:
     balance = db.get_state("credits_balance")
     spent = db.credits_spent_since(state.month_start_ts())
 
+    ext = db.get_state("ext_status") or {}
+
     print("FlowBridge")
     print(f"  rozšíření:  {'hlásí se' if alive else 'neozvalo se'}"
           f"{' (pozastavený)' if state.paused() else ''}"
           f"   poslední tep: {fmt_ts(hb)}")
+    if alive:
+        ladeni = ("chybí oprávnění debugger" if ext.get("umiLadit") is False
+                  else (ext.get("chybaLadeni") or "ok"))
+        print(f"  prohlížeč:  {'generuje' if ext.get('running') else 'čeká'}"
+              f" | v projektu: {'ano' if ext.get('project') else 'NE'}"
+              f" | odposlech: {'ok' if ext.get('odposlech') else 'NEBĚŽÍ'}"
+              f" | ladění: {ladeni}")
+        if ext.get("lastLog"):
+            print(f"  naposled:   {str(ext['lastLog'])[:90]}")
     summary = ", ".join(f"{k}={v}" for k, v in sorted(counts.items())) or "prázdná"
     print(f"  fronta:     {summary}")
     print(f"  kredity:    zůstatek {balance if balance is not None else '?'}"
           f" | tento měsíc utraceno {spent}/{CFG.monthly_budget}")
-    print(f"  projekt:    {CFG.project_url or '(zatím žádný)'}")
+    print(f"  projekt:    {state.project_url() or '(zatím žádný)'}")
     print(f"  výstupy:    {CFG.outputs_dir}")
     if args.events:
         print("\nPoslední události:")
         for e in db.recent_events(args.events):
             print(f"  {fmt_ts(e['ts'])} [{e['level']}] {e['message'][:100]}")
+
+
+def cmd_project(args: argparse.Namespace) -> None:
+    from . import state
+    db.init()
+    if args.url is None:
+        print(state.project_url() or "(zatím žádný projekt)")
+        return
+    url = args.url.strip()
+    if url and not url.startswith("https://labs.google/"):
+        raise SystemExit("Čekám adresu projektu na labs.google.")
+    state.set_project_url(url)
+    print(f"Projekt nastaven: {url or '(žádný)'}")
+
+
+def cmd_dump(args: argparse.Namespace) -> None:
+    """Vypise posledni dump stranky Flow od rozsireni.
+
+    Podle nej se opravuji selektory, kdyz Google zmeni popisky tlacitek.
+    """
+    folder = CFG.outputs_dir / "_diagnostika"
+    files = sorted(folder.glob("dump-*.json"), reverse=True) if folder.exists() else []
+    if not files:
+        print("Zatím žádná diagnostika.")
+        print("V panelu FlowBridge klikni na Diagnostika (nebo počkej, až úloha selže).")
+        return
+    if args.list:
+        for f in files[:20]:
+            print(f"{fmt_ts(f.stat().st_mtime)}  {f}")
+        return
+    path = files[min(args.index, len(files) - 1)]
+    print(f"# {path}\n")
+    print(path.read_text(encoding="utf-8")[: args.chars])
 
 
 def cmd_cancel(args: argparse.Namespace) -> None:
@@ -301,6 +345,17 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("retry", help="vrátí úlohy do fronty")
     sp.add_argument("ids", nargs="+")
     sp.set_defaults(func=cmd_retry)
+
+    sp = sub.add_parser("project", help="ukáže nebo nastaví projekt ve Flow")
+    sp.add_argument("url", nargs="?", default=None,
+                    help="https://labs.google/fx/tools/flow/project/<id>")
+    sp.set_defaults(func=cmd_project)
+
+    sp = sub.add_parser("dump", help="vypíše poslední diagnostiku stránky Flow")
+    sp.add_argument("--index", type=int, default=0, help="0 = nejnovější")
+    sp.add_argument("--list", action="store_true", help="jen vypsat dostupné dumpy")
+    sp.add_argument("--chars", type=int, default=20000, help="kolik znaků vypsat")
+    sp.set_defaults(func=cmd_dump)
 
     sub.add_parser("pause", help="pozastaví vydávání úloh rozšíření").set_defaults(func=cmd_pause)
     sub.add_parser("resume", help="znovu povolí vydávání úloh").set_defaults(func=cmd_resume)

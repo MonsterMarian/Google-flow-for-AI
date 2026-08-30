@@ -30,6 +30,7 @@ class Config:
     # -- flow -----------------------------------------------------------
     @property
     def project_url(self) -> str:
+        """Vychozi projekt. Aktualni drzi databaze - viz state.project_url()."""
         return self.raw.get("flow", {}).get("project_url", "") or ""
 
     @property
@@ -110,22 +111,12 @@ class Config:
     def server_port(self) -> int:
         return int(self.raw.get("server", {}).get("port", 8765))
 
-    # -- zapis ----------------------------------------------------------
-    def set_project_url(self, url: str) -> None:
-        self.raw.setdefault("flow", {})["project_url"] = url
-        save(self)
-
 
 def load() -> Config:
     if CONFIG_PATH.exists():
         with CONFIG_PATH.open("r", encoding="utf-8") as fh:
             return Config(yaml.safe_load(fh) or {})
     return Config({})
-
-
-def save(cfg: Config) -> None:
-    with CONFIG_PATH.open("w", encoding="utf-8") as fh:
-        yaml.safe_dump(cfg.raw, fh, allow_unicode=True, sort_keys=False)
 
 
 CFG = load()
