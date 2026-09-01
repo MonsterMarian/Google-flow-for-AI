@@ -121,11 +121,40 @@
     for (const j of state.jobs) if (j.status === "running") j.status = "queued";
   }
 
+  /* Po znovunacteni rozsireni zustane stara kopie skriptu ve strance bezet,
+     ale vsechna volani chrome.* uz padaji na "Extension context invalidated".
+     Bez teto kontroly by to sypalo chyby do konzole donekonecna. */
+  let kontextPryc = false;
+  function kontextZije() {
+    if (kontextPryc) return false;
+    try {
+      if (chrome.runtime?.id) return true;
+    } catch {
+      /* pristup k runtime uz taky umi vyhodit */
+    }
+    kontextPryc = true;
+    state.running = false;
+    console.log("[FlowBridge] rozšíření bylo načteno znovu - obnov stránku (F5)");
+    if (panel) {
+      const box = panel.querySelector("#fb-log");
+      if (box) {
+        box.innerHTML = '<div class="warn">rozšíření bylo načteno znovu '
+          + "– obnov stránku (F5)</div>" + box.innerHTML;
+      }
+    }
+    return false;
+  }
+
   let saveTimer = null;
   function save() {
     clearTimeout(saveTimer);
     saveTimer = setTimeout(() => {
-      chrome.storage.local.set({ flowbridge: state });
+      if (!kontextZije()) return;
+      try {
+        chrome.storage.local.set({ flowbridge: state });
+      } catch {
+        kontextZije();
+      }
     }, 150);
   }
 
@@ -469,6 +498,356 @@
     throw new Error("Flow na odeslání nezareagoval");
   }
 
+  // -------------------------------------------------------------------------
+  // predlohy (referencni obrazky pripojene k promptu)
+  //
+  // Flow je bere pres skryty <input type="file"> v ovladacim pruhu. Tlacitko,
+  // ktere ho odkryva, nema stabilni popisek - jako vsude jinde tady proto
+  // zkousime vic cest a to, ktera zabrala, jde do logu.
+  //
+  // Bajty se do stranky dostavaji dvema cestami:
+  //   - uloha od agenta nese adresu /ext/ref na mustku; stahne ji service
+  //     worker, protoze stranka Flow bezi na https a na 127.0.0.1 nedosahne,
+  //   - predlohy vybrane v panelu lezi jako data URL v chrome.storage.
+  // -------------------------------------------------------------------------
+
+  const REFS_KEY = "flowbridgeRefs";   // {idPredlohy: dataUrl}
+  const MAX_REFS = 6;                  // vic jich Flow k jednomu promptu nevezme
+  const refCache = new Map();          // adresa z mustku -> dataUrl
+
+  async function refStore() {
+    const got = await chrome.storage.local.get(REFS_KEY);
+    return got[REFS_KEY] || {};
+  }
+
+  async function ulozPredlohy(items) {
+    if (!items.length) return;
+    const all = await refStore();
+    for (const it of items) all[it.id] = it.dataUrl;
+    await chrome.storage.local.set({ [REFS_KEY]: all });
+  }
+
+  /* Predlohy prezivaji obnoveni stranky, takze se uklizeji az podle toho, co
+     ve fronte opravdu zbylo - jinak by po kazde smazane uloze zustavaly
+     v ulozisti megabajty base64. */
+  async function uklidPredlohy() {
+    const all = await refStore();
+    const zive = new Set();
+    for (const j of state.jobs) {
+      for (const r of j.refs || []) {
+        const u = String(r.url || "");
+        if (u.startsWith("local:")) zive.add(u.slice(6));
+      }
+    }
+    let zmena = false;
+    for (const id of Object.keys(all)) {
+      if (!zive.has(id)) {
+        delete all[id];
+        zmena = true;
+      }
+    }
+    if (zmena) await chrome.storage.local.set({ [REFS_KEY]: all });
+  }
+
+  /* Predloha se do Flow podstrkuje pres ladici rozhrani, a to umi pracovat
+     jen se souborem na disku - ne s bajty. Ulohy od agentu maji cestu rovnou
+     od mustku; predlohu vybranou v panelu ma prohlizec jen jako bajty (pravou
+     cestu k souboru neprozradi), takze ji nejdriv posle mustku k ulozeni. */
+  async function refToPath(ref, poradi) {
+    const jmeno = ref.name || `predloha-${poradi + 1}.png`;
+
+    // uloha z mustku uz cestu zna
+    if (ref.path) return ref.path;
+
+    const url = String(ref.url || "");
+    if (!url.startsWith("local:")) {
+      throw new Error(`předloha ${jmeno} nemá cestu na disku`);
+    }
+    // jedna uloha posila az tri davky za sebou - podruhe uz jen z pameti
+    if (refCache.has(url)) return refCache.get(url);
+
+    const dataUrl = (await refStore())[url.slice(6)];
+    if (!dataUrl) throw new Error(`předloha ${jmeno} už není v paměti prohlížeče`);
+    if (!state.settings.bridgeEnabled) {
+      throw new Error(`předlohu ${jmeno} musí uložit můstek - zapni ho (Můstek: zap)`);
+    }
+
+    const res = await withTimeout(
+      chrome.runtime.sendMessage({
+        type: "refToDisk", bridgeUrl: state.settings.bridgeUrl, dataUrl, name: jmeno,
+      }),
+      60000,
+      { ok: false, error: "můstek neodpověděl" }
+    );
+    if (!res?.ok) throw new Error(`předlohu ${jmeno} se nepodařilo uložit: ${res?.error}`);
+    if (refCache.size >= 8) refCache.delete(refCache.keys().next().value);
+    refCache.set(url, res.path);
+    return res.path;
+  }
+
+  /* Predloha se do promptu dostava nadvakrat (odmereno na zive strance Flow):
+       1. nahraje se do knihovny projektu pres "Create" -> "Upload media",
+       2. v nabidce te polozky se klikne na "Add to prompt".
+     Samotne nahrani predlohu k promptu nepripoji - obrazek jen pristane
+     v Uploads a prompt o nem nevi.
+
+     Prvni krok nejde udelat ze stranky: vstup na soubory si Flow vyrabi az
+     pri kliknuti a hned ho zahazuje, a zapis do toho druheho (reactoveho)
+     nahravani nespousti. Proto jde pres ladici rozhrani - stejne jako
+     odesilani promptu. */
+
+  /* Adresa, pod kterou Flow servíruje knihovní média. Nahledy pripojenych
+     predloh vypadaji stejne - proto se poznavaji podle mista, ne podle URL. */
+  const MEDIA_URL = /media\.getMediaUrlRedirect|googleusercontent\.com|storage\.googleapis\.com/;
+
+  const mediaName = (src) => (String(src).match(/[?&]name=([^&]+)/) || [])[1] || null;
+
+  /* Znacka, podle ktere si service worker najde spravny vstup - viz
+     background.js. Ze stranky ho vybrat umime, on ne. */
+  const CIL_ATRIBUT = "data-flowbridge-cil";
+
+  /* Vstup na soubory, ktery Flow opravdu obsluhuje.
+     Na strance jich je vic (jeden je nas vlastni v panelu, dalsi si Flow
+     vyrabi pri klikani), ale jen na tom spravnem visi React - pozname ho
+     podle __reactProps s onChange. */
+  function flowFileInput() {
+    const vse = [...document.querySelectorAll('input[type="file"]')]
+      .filter((i) => !i.closest("#flowbridge-panel"));
+    return vse.find((i) =>
+      Object.keys(i).some((k) => k.startsWith("__reactProps") && i[k]?.onChange))
+      || vse[0] || null;
+  }
+
+  /* Nahledy predloh uz pripojenych k promptu - ty jsou v ovladacim pruhu. */
+  function refThumbs() {
+    const b = bar();
+    if (!b) return [];
+    return [...b.querySelectorAll("img")]
+      .filter((im) => MEDIA_URL.test(im.currentSrc || im.src || ""));
+  }
+
+  /* Karty medii v knihovne projektu (levy panel), bez tech v ovladacim pruhu.
+     Tez medium se v seznamu vykresluje vickrat (nahled + detail), takze se
+     odfiltruje podle jmena - jinak by se stejny obrazek pripojil dvakrat
+     misto dvou ruznych. */
+  function libraryMedia() {
+    const b = bar();
+    const videne = new Set();
+    const out = [];
+    for (const im of document.querySelectorAll("img")) {
+      const src = im.currentSrc || im.src || "";
+      if (im.closest("#flowbridge-panel")) continue;
+      if (b && b.contains(im)) continue;
+      if (!MEDIA_URL.test(src)) continue;
+      if (/googleusercontent\.com\/a\//.test(src)) continue;   // avatar
+      const klic = mediaName(src) || src;
+      if (videne.has(klic)) continue;
+      videne.add(klic);
+      out.push(im);
+    }
+    return out;
+  }
+
+  /* Otevre vyber medii ("Create" v ovladacim pruhu).
+     Zmereno naostro: bez nej se nahrany obrazek do DOM vubec nevykresli -
+     nahrani probehne, ale vypada, ze selhalo, protoze v knihovne nic nepribude.
+     Odkazy v levem panelu (Uploads / All Media) na to nestaci. */
+  const vyberOtevren = () => !!najdiPodleTextu(/upload media/i);
+
+  /* Otevreny vyber medii prekryva ovladaci pruh, takze by se pak neodeslalo.
+     Po pripojeni predloh se proto musi zase zavrit. */
+  async function closeLibrary() {
+    if (!vyberOtevren()) return;
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await sleep(500);
+    if (vyberOtevren()) {
+      const create = najdiPodleTextu(/^add_2 Create$/);
+      if (create) realClick(create);
+      await pockej(() => !vyberOtevren(), 4000, 300);
+    }
+  }
+
+  async function openLibrary() {
+    // Uz otevreny? Znovu na "Create" klikat nesmime - zavrelo by se to.
+    if (!vyberOtevren()) {
+      const create = najdiPodleTextu(/^add_2 Create$/);
+      if (!create) return false;
+      realClick(create);
+      // Flow si vyber vykresluje se zpozdenim; par set milisekund nestaci.
+      if (!(await pockej(vyberOtevren, 8000, 400))) return false;
+    }
+    // ve vyberu jeste prepneme na nahrana media, at je videt to nase
+    if (!libraryMedia().length && clickByLabel("Uploads")) await sleep(900);
+    return true;
+  }
+
+  async function pockej(podminka, limitMs, krok = 400) {
+    const konec = Date.now() + limitMs;
+    while (Date.now() < konec) {
+      if (podminka()) return true;
+      await sleep(krok);
+    }
+    return false;
+  }
+
+  /* Nabidku karty odkryva az najeti mysi, takze samotny klik nestaci. */
+  function hover(el) {
+    const r = el.getBoundingClientRect();
+    const base = { bubbles: true, cancelable: true, composed: true,
+      clientX: r.left + r.width / 2, clientY: r.top + r.height / 2, pointerType: "mouse" };
+    el.dispatchEvent(new PointerEvent("pointerover", base));
+    el.dispatchEvent(new MouseEvent("mouseover", base));
+    el.dispatchEvent(new MouseEvent("mousemove", base));
+  }
+
+  /* Klikne na polozku podle presneho popisku kdekoli na strance.
+     Vlastni panel vynechavame - tlacitka v nem se jmenuji podobne. */
+  function clickByLabel(label, root = document) {
+    const hits = [];
+    for (const el of root.querySelectorAll(CLICKABLE + ",span,div")) {
+      if (el.closest("#flowbridge-panel")) continue;
+      if (labelMatches(norm(el), label)) hits.push(el);
+    }
+    if (!hits.length) return false;
+    hits.sort((a, b) => norm(a).length - norm(b).length);
+    return realClick(hits[0].closest(CLICKABLE) || hits[0]);
+  }
+
+  /* Najde klikatelny prvek podle textu - pro diagnostiku, at je poznat,
+     jestli Flow jeste ma prvky, na kterych stojime. */
+  function najdiPodleTextu(vzor, limitDelky = 40) {
+    for (const el of document.querySelectorAll(CLICKABLE)) {
+      if (el.closest("#flowbridge-panel")) continue;
+      const t = norm(el);
+      if (t.length <= limitDelky && vzor.test(t)) return el;
+    }
+    return null;
+  }
+
+  /* Flow to pise dvakrat jinak: ve vyberu medii "Add to Prompt", v nabidce
+     karty "add Add to prompt". Proto bez ohledu na velikost pismen. */
+  const ADD_TO_PROMPT = /(^|\s)add to prompt$/i;
+  const jeAddToPrompt = (el) => {
+    const t = norm(el);
+    return t.length <= 40 && ADD_TO_PROMPT.test(t) && !el.closest("#flowbridge-panel");
+  };
+
+  function polozkyAddToPrompt() {
+    return [...document.querySelectorAll(CLICKABLE)].filter(jeAddToPrompt);
+  }
+
+  /* Z media v knihovne udela predlohu promptu.
+
+     Ve vyberu medii ma karta rovnou tlacitko "Add to Prompt"; v seznamu medii
+     je tataz volba schovana pod "More". Zkousime obe cesty. */
+  async function addToPrompt(img) {
+    const karta = img.closest("div[class]")?.parentElement || img.parentElement;
+
+    hover(img);
+    if (karta) hover(karta);
+    await sleep(400);
+
+    // 1) tlacitko primo na karte
+    const primo = karta && [...karta.querySelectorAll(CLICKABLE)].find(jeAddToPrompt);
+    if (primo) {
+      realClick(primo);
+      await sleep(700);
+      return true;
+    }
+
+    // 2) schovane pod "More". Rozbalene nabidky Flow po sobe obcas necha
+    //    v DOM, takze se bere jen polozka, ktera prave ted pribyla.
+    const stare = new Set(polozkyAddToPrompt());
+    const more = karta && [...karta.querySelectorAll(CLICKABLE)]
+      .find((b) => /more_vert/.test(norm(b)));
+    if (!more) return false;
+    realClick(more);
+    await sleep(600);
+
+    const cerstve = polozkyAddToPrompt().filter((el) => !stare.has(el));
+    if (!cerstve.length) return false;
+    cerstve.sort((a, b) => norm(a).length - norm(b).length);
+    realClick(cerstve[0].closest(CLICKABLE) || cerstve[0]);
+    await sleep(700);
+    return true;
+  }
+
+  /* Pripoji predlohy k prave napsanemu promptu a vrati, cim se to povedlo -
+     stejne jako u odeslani je to jediny zpusob, jak zvenci poznat, ktera cesta
+     jeste funguje.
+
+     Kdyz to nevyjde, vyhodi chybu a davka se neodesle: obrazek bez predlohy je
+     uplne jiny obrazek a u videa jsou to navic utracene kredity. */
+  async function attachRefs(job) {
+    const vsechny = job.refs || [];
+    const refs = vsechny.slice(0, MAX_REFS);
+    if (!refs.length) return null;
+    if (vsechny.length > refs.length) {
+      log(`úloha má ${vsechny.length} předloh, posílám prvních ${MAX_REFS}`, "warn");
+    }
+
+    // Flow po odeslani predlohy z promptu zahodi. Kdyz je jeste drzi, druha
+    // davka te same ulohy je pripojovat znovu nesmi - jen by se zdvojily.
+    const uz = refThumbs().length;
+    if (uz >= refs.length) return `už připojené (${uz})`;
+
+    const paths = [];
+    for (let i = 0; i < refs.length; i++) paths.push(await refToPath(refs[i], i));
+
+    // 1) nahrat do knihovny projektu.
+    //    Vyber medii musi byt otevreny driv, nez se nahrava - jinak Flow
+    //    nahrany obrazek nikde nevykresli a cekani na nej vyprsi naprazdno.
+    if (!(await openLibrary())) {
+      throw new Error("nepodařilo se otevřít výběr médií („Create“ v ovládacím pruhu)");
+    }
+    const predUploadem = new Set(libraryMedia().map((im) => mediaName(im.src) || im.src));
+
+    // Ladici rozhrani na vlastnosti JS nedosahne, takze mu ten spravny vstup
+    // musime ukazat znackou v DOM.
+    const vstup = flowFileInput();
+    if (!vstup) throw new Error("nenašel jsem ve Flow vstup pro soubory");
+    vstup.setAttribute(CIL_ATRIBUT, "1");
+    let res;
+    try {
+      res = await withTimeout(
+        chrome.runtime.sendMessage({ type: "attachFiles", paths }),
+        40000,
+        { ok: false, error: "ladicí rozhraní neodpovědělo" }
+      );
+    } finally {
+      vstup.removeAttribute(CIL_ATRIBUT);
+    }
+    if (!res?.ok) throw new Error(`předlohy se nepodařilo předat Flow: ${res?.error}`);
+
+    const nove = () => libraryMedia()
+      .filter((im) => !predUploadem.has(mediaName(im.src) || im.src));
+    if (!(await pockej(() => nove().length >= paths.length, 90000))) {
+      throw new Error(`nahrálo se jen ${nove().length} z ${paths.length} předloh`
+        + (libraryMedia().length ? "" : " (knihovna médií se neotevřela)"));
+    }
+
+    // 2) z knihovny do promptu; za pripojenou se pocita jen ta, kterou pak
+    //    opravdu vidime v pruhu - klik do nabidky sam o sobe nic nedokazuje
+    let pripojeno = 0;
+    for (const img of nove().slice(0, paths.length)) {
+      const pred = refThumbs().length;
+      if (!(await addToPrompt(img))) {
+        log("nabídka „Add to prompt“ se u předlohy neotevřela", "warn");
+        continue;
+      }
+      if (await pockej(() => refThumbs().length > pred, 6000)) pripojeno++;
+      else log("předloha se z knihovny do promptu nepropsala", "warn");
+    }
+    // Vyber medii prekryva pruh - bez zavreni by se prompt neodeslal.
+    await closeLibrary();
+
+    if (!pripojeno) throw new Error("předlohy se nahrály, ale nešly připojit k promptu");
+    if (pripojeno < paths.length) {
+      log(`k promptu se připojilo jen ${pripojeno} z ${paths.length} předloh`, "warn");
+    }
+    return `${pripojeno} z ${paths.length} ks`;
+  }
+
   /* Vsechna media, ktera ted stranka zna. Avatary vyhazujeme. */
   function mediaSnapshot() {
     const out = new Set();
@@ -662,11 +1041,16 @@
       const beforeDom = mediaSnapshot();
       const od = Date.now();
       let submitted = 0;
+      let posledniChyba = null;
 
       for (const size of wave) {
         if (!state.running) break;
         try {
           await setPrompt(job.prompt);
+          // Predlohy musi byt na miste driv, nez se cte odhad kreditu -
+          // s pripojenym obrazkem stoji generovani jinak.
+          const jakRef = await attachRefs(job);
+          if (jakRef) log(`předlohy: ${jakRef}`);
           const est = await configure(job, size);
           if (job.kind === "video" && est != null && est > state.settings.maxCreditsPerJob) {
             throw new Error(`odhad ${est} kr. překračuje strop ${state.settings.maxCreditsPerJob} kr.`);
@@ -678,7 +1062,8 @@
         } catch (e) {
           // jedna davka neprosla - zbytek vlny jede dal, chybejici kusy
           // se dopočítají v dalším kole
-          log(`dávka neprošla: ${e.message || e}`, "warn");
+          posledniChyba = String(e.message || e);
+          log(`dávka neprošla: ${posledniChyba}`, "warn");
         }
         render();
         await sleep(randomPause());
@@ -686,7 +1071,10 @@
 
       if (!submitted) {
         prazdnychVln++;
-        if (prazdnychVln >= 3) throw new Error("třikrát po sobě se nepodařilo odeslat");
+        if (prazdnychVln >= 3) {
+          throw new Error("třikrát po sobě se nepodařilo odeslat"
+            + (posledniChyba ? `: ${posledniChyba}` : ""));
+        }
         await sleep(20000 * prazdnychVln);
         continue;
       }
@@ -807,6 +1195,7 @@
     busy = true;
     try {
       while (state.running) {
+        if (!kontextZije()) break;
         if (!(await zajistiProjekt())) {
           await sleep(8000);
           continue;
@@ -865,6 +1254,7 @@
      Bezi na vlastnim casovaci, takze mustek funguje i kdyz fronta nejede. */
   async function bridgeTick(force = false) {
     if (!state.settings.bridgeEnabled) return "off";
+    if (!kontextZije()) return "off";
     if (!force && Date.now() - lastBridge < 10000) return "skip";
     lastBridge = Date.now();
     try {
@@ -918,6 +1308,9 @@
           model: j.model || null,
           aspect: j.aspect || null,
           duration: j.duration || null,
+          // Mustek posila jen adresy - bajty predloh si vyzvedneme az tesne
+          // pred odeslanim, at se ve stavu nevalí megabajty base64.
+          refs: Array.isArray(j.refs) ? j.refs : [],
           tag: j.tag || "agent",
           status: "queued",
           done: [],
@@ -1014,6 +1407,17 @@
       kredity: creditBalance,
       editor: ed ? popisPrvku(ed) : null,
       editorText: ed ? editorText(ed).slice(0, 200) : null,
+      // Predloha jde do promptu nadvakrat (nahrat -> "Add to prompt"), takze
+      // se hlasi obe faze zvlast - jinak by nebylo poznat, ktera se rozbila.
+      predlohy: {
+        vstupu: document.querySelectorAll('input[type="file"]').length,
+        vstupSReactem: !!flowFileInput(),
+        tlacitkoCreate: !!najdiPodleTextu(/^add_2 Create$/),
+        mediiVKnihovne: libraryMedia().length,
+        nahleduVPruhu: refThumbs().length,
+        // popisek, na kterem stoji druha faze
+        polozekAddToPrompt: polozkyAddToPrompt().length,
+      },
       pruh: b ? [...b.querySelectorAll("button")].map(popisPrvku) : null,
       odeslat: sb ? { ...popisPrvku(sb), pripraveno: submitReady() } : null,
       popover: null,
@@ -1129,6 +1533,9 @@
         </div>
         <label>model (prázdné = co je zrovna nastavené)</label>
         <input id="fb-model" placeholder="Nano Banana 2">
+        <label>předlohy (obrázky do promptu)</label>
+        <input id="fb-files" type="file" accept="image/*" multiple>
+        <div class="fb-refs" id="fb-reflist"></div>
         <label>složka pro výstupy</label>
         <input id="fb-tag" value="default">
         <div class="fb-row">
@@ -1173,12 +1580,30 @@
     pmin.onchange = () => { state.settings.pauseMinSeconds = Math.max(1, +pmin.value || 4); save(); };
     pmax.onchange = () => { state.settings.pauseMaxSeconds = Math.max(+pmin.value || 4, +pmax.value || 11); save(); };
 
+    const vstupSouboru = panel.querySelector("#fb-files");
+    vstupSouboru.onchange = async () => {
+      for (const f of [...vstupSouboru.files]) {
+        if (predlohy.length >= MAX_REFS) {
+          log(`víc než ${MAX_REFS} předloh Flow k jednomu promptu nevezme`, "warn");
+          break;
+        }
+        try {
+          predlohy.push({ id: nowId(), name: f.name, dataUrl: await ctiSoubor(f) });
+        } catch (e) {
+          log(`předlohu ${f.name} se nepodařilo načíst: ${e.message || e}`, "warn");
+        }
+      }
+      vstupSouboru.value = ""; // aby sel stejny soubor vybrat znovu
+      renderRefs();
+    };
+
     panel.querySelector("#fb-add").onclick = addFromForm;
     panel.querySelector("#fb-run").onclick = () => (state.running ? stop() : start());
     panel.querySelector("#fb-clear").onclick = () => {
       state.jobs = state.jobs.filter((j) => j.status !== "done" && j.status !== "failed");
       save();
       render();
+      uklidPredlohy();
     };
     panel.querySelector("#fb-auto").onclick = () => {
       state.settings.autopilot = !state.settings.autopilot;
@@ -1216,7 +1641,35 @@
     panel.classList.toggle("fb-collapsed", !!state.settings.collapsed);
   }
 
-  function addFromForm() {
+  /* Predlohy vybrane v panelu. Data URL se do stavu nedavaji - stav se uklada
+     po kazdem radku logu a megabajty base64 by se prepisovaly porad dokola.
+     Ve stavu je proto jen odkaz "local:<id>" a bajty lezi zvlast. */
+  let predlohy = [];   // [{id, name, dataUrl}]
+
+  const ctiSoubor = (file) =>
+    new Promise((res, rej) => {
+      const fr = new FileReader();
+      fr.onload = () => res(fr.result);
+      fr.onerror = () => rej(new Error("soubor se nepodařilo přečíst"));
+      fr.readAsDataURL(file);
+    });
+
+  function renderRefs() {
+    const box = panel?.querySelector("#fb-reflist");
+    if (!box) return;
+    box.innerHTML = predlohy
+      .map((p, i) => `<span class="fb-ref">${esc(p.name)}`
+        + `<button class="fb-x" data-ref="${i}" title="odebrat">×</button></span>`)
+      .join("");
+    box.querySelectorAll("[data-ref]").forEach((b) => {
+      b.onclick = () => {
+        predlohy.splice(+b.dataset.ref, 1);
+        renderRefs();
+      };
+    });
+  }
+
+  async function addFromForm() {
     const raw = panel.querySelector("#fb-prompt").value;
     const prompts = raw.split("\n").map((s) => s.trim()).filter(Boolean);
     if (!prompts.length) return;
@@ -1226,6 +1679,9 @@
     const duration = parseInt(panel.querySelector("#fb-duration").value, 10) || null;
     const model = panel.querySelector("#fb-model").value.trim() || null;
     const tag = panel.querySelector("#fb-tag").value.trim() || "default";
+    // Bajty se ulozi jednou; vsechny ulohy z tohohle pridani na ne jen ukazou.
+    const refs = predlohy.map((p) => ({ name: p.name, url: "local:" + p.id }));
+    await ulozPredlohy(predlohy);
 
     for (const prompt of prompts) {
       state.jobs.push({
@@ -1236,6 +1692,7 @@
         model,
         aspect,
         duration,
+        refs,
         tag,
         status: "queued",
         done: [],
@@ -1243,7 +1700,10 @@
       });
     }
     panel.querySelector("#fb-prompt").value = "";
-    log(`přidáno ${prompts.length} úloh`);
+    // Predlohy zamerne zustavaji vybrane - typicky se k jedne postave nebo
+    // produktu pridava vic promptu za sebou. Odebrat je jde krizkem.
+    log(`přidáno ${prompts.length} úloh`
+      + (refs.length ? ` s ${refs.length} předlohami` : ""));
     save();
     render();
     if (state.settings.autopilot && !state.running) start();
@@ -1298,7 +1758,8 @@
             <button class="fb-x" data-del="${j.id}" title="odebrat">×</button>
           </div>
           <div class="fb-meta">${j.kind === "video" ? "video" : "obrázky"} ·
-            ${got}/${j.count} · ${esc(j.tag)}${j.credits ? " · " + j.credits + " kr." : ""}</div>
+            ${got}/${j.count} · ${esc(j.tag)}${j.credits ? " · " + j.credits + " kr." : ""}${
+              (j.refs || []).length ? " · " + j.refs.length + " předl." : ""}</div>
           ${j.error ? `<div class="fb-err">${esc(j.error)}</div>` : ""}
         </div>`;
       })
@@ -1309,9 +1770,11 @@
         state.jobs = state.jobs.filter((x) => x.id !== b.dataset.del);
         save();
         render();
+        uklidPredlohy();
       };
     });
 
+    renderRefs();
     renderLog();
   }
 
@@ -1370,6 +1833,9 @@
 
     buildPanel();
     render();
+    // po restartu prohlizece muzou v ulozisti zbyt predlohy uloh, ktere uz
+    // nikde nejsou
+    uklidPredlohy();
     if (naProjektu()) {
       state.settings.projectUrl = location.href;
       save();
@@ -1378,7 +1844,7 @@
 
     // mustek se pta na ulohy nezavisle na tom, jestli fronta zrovna bezi
     setInterval(() => {
-      if (state.settings.bridgeEnabled) bridgeTick();
+      if (kontextZije() && state.settings.bridgeEnabled) bridgeTick();
     }, 10000);
     if (state.settings.bridgeEnabled) bridgeTick(true);
 

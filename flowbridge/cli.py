@@ -58,18 +58,46 @@ def print_jobs(jobs: list[dict[str, Any]]) -> None:
     if not jobs:
         print("Fronta je prázdná.")
         return
-    print(f"{'':2} {'ID':12} {'STAV':10} {'TYP':6} {'KS':>3}  {'TAG':12} {'VYTVOŘENO':12} PROMPT")
+    # sloupec za KS je pocet predloh (+2p), jinak prazdny
+    print(f"{'':2} {'ID':12} {'STAV':10} {'TYP':6} {'KS':>3}{'':5}{'TAG':12} "
+          f"{'VYTVOŘENO':12} PROMPT")
     for j in jobs:
         mark = STATUS_MARK.get(j["status"], "  ")
         got = len(j.get("result_files") or [])
         ks = f"{got}/{j['count']}" if got else str(j["count"])
-        print(f"{mark} {j['id']:12} {j['status']:10} {j['kind']:6} {ks:>3}  "
+        predlohy = f" +{len(j['refs'])}p" if j.get("refs") else ""
+        print(f"{mark} {j['id']:12} {j['status']:10} {j['kind']:6} {ks:>3}{predlohy:<5}"
               f"{j.get('tag', '')[:12]:12} {fmt_ts(j['created_at']):12} {j['prompt'][:58]}")
 
 
 # ---------------------------------------------------------------------------
 # prikazy
 # ---------------------------------------------------------------------------
+
+def resolve_refs(paths: list[str] | None) -> tuple[list[str], list[str]]:
+    """Predlohy prevede na absolutni cesty; vrati (nalezene, chybejici).
+
+    Bajty si z nich vezme az rozsireni pres mustek, takze soubor musi zustat
+    na miste, dokud uloha nedobehne.
+    """
+    out: list[str] = []
+    chybi: list[str] = []
+    for raw in paths or []:
+        path = Path(raw)
+        if path.is_file():
+            out.append(str(path.resolve()))
+        else:
+            chybi.append(str(raw))
+    return out, chybi
+
+
+def refs_or_die(paths: list[str] | None) -> list[str]:
+    """Predlohy pro jednu ulohu - chybejici soubor beh rovnou ukonci."""
+    out, chybi = resolve_refs(paths)
+    if chybi:
+        raise SystemExit(f"Předloha neexistuje: {chybi[0]}")
+    return out
+
 
 def default_count(args: argparse.Namespace) -> int:
     """Bez --count chceme u obrazku plnou davku, u videa jeden kus."""
@@ -80,7 +108,7 @@ def default_count(args: argparse.Namespace) -> int:
 
 def cmd_add(args: argparse.Namespace) -> None:
     db.init()
-    refs = [str(Path(r).resolve()) for r in (args.ref or [])]
+    refs = refs_or_die(args.ref)
     count = default_count(args)
     job_id = db.add_job(
         kind=args.kind,
@@ -107,13 +135,29 @@ def cmd_addfile(args: argparse.Namespace) -> None:
         raise SystemExit(f"Soubor {path} neexistuje.")
 
     added = 0
+    spolecne_refs = refs_or_die(getattr(args, "ref", None))
     if path.suffix.lower() in (".json", ".jsonl"):
         raw = path.read_text(encoding="utf-8")
         items = ([json.loads(line) for line in raw.splitlines() if line.strip()]
                  if path.suffix.lower() == ".jsonl" else json.loads(raw))
         if isinstance(items, dict):
             items = [items]
+
+        # Predlohy se overuji pro vsechny ulohy predem. Kdyby se kontrolovalo
+        # az pri vkladani, pulka souboru uz je ve fronte a druha ne - a chyba
+        # navic ukaze jen prvni spatnou cestu z mozna deseti.
+        refs_pro: list[list[str]] = []
+        potize: list[str] = []
         for item in items:
+            nalezene, chybi = resolve_refs(item.get("refs"))
+            refs_pro.append(nalezene or spolecne_refs)
+            for c in chybi:
+                potize.append(f"  {c}\n    (úloha: {str(item.get('prompt', ''))[:60]})")
+        if potize:
+            raise SystemExit(f"V {path.name} chybí {len(potize)} předloh, "
+                             f"nepřidávám nic:\n" + "\n".join(potize))
+
+        for item, refs in zip(items, refs_pro):
             db.add_job(
                 kind=item.get("kind", args.kind),
                 prompt=item["prompt"],
@@ -121,7 +165,7 @@ def cmd_addfile(args: argparse.Namespace) -> None:
                 count=int(item.get("count", default_count(args))),
                 aspect=item.get("aspect", args.aspect),
                 duration=item.get("duration"),
-                refs=item.get("refs", []),
+                refs=refs,
                 tag=item.get("tag", args.tag),
                 priority=int(item.get("priority", args.priority)),
                 source="file",
@@ -139,8 +183,8 @@ def cmd_addfile(args: argparse.Namespace) -> None:
             while zbyva > 0:
                 kus = min(max_batch, zbyva)
                 db.add_job(kind=args.kind, prompt=line, model=args.model,
-                           count=kus, aspect=args.aspect, tag=args.tag,
-                           priority=args.priority + i, source="file")
+                           count=kus, aspect=args.aspect, refs=spolecne_refs,
+                           tag=args.tag, priority=args.priority + i, source="file")
                 added += 1
                 zbyva -= kus
     celkem = sum(j["count"] for j in db.list_jobs(status=db.QUEUED, tag=args.tag, limit=5000))
@@ -326,6 +370,8 @@ def build_parser() -> argparse.ArgumentParser:
     add_job_flags(sp)
     sp.add_argument("--per-prompt", type=int, default=None,
                     help="kolik kusů na každý prompt; větší číslo se rozdělí na úlohy po 12")
+    sp.add_argument("--ref", action="append",
+                    help="předloha pro všechny prompty ze souboru (lze vícekrát)")
     sp.set_defaults(func=cmd_addfile)
 
     sp = sub.add_parser("list", help="vypíše frontu")

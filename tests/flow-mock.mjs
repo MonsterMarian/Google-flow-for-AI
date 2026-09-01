@@ -15,6 +15,11 @@ import { readFileSync } from "fs";
 
 export const CESTA_CONTENT = new URL("../extension/content.js", import.meta.url);
 
+/* Nejmensi platny PNG - staci na to, aby z nej slo postavit File. */
+export const PNG_1PX =
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAA" +
+  "DUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
 export function postavFlow(opts = {}) {
   const dom = new JSDOM("<!doctype html><html><body></body></html>", {
     url: "https://labs.google/fx/tools/flow/project/test-1234",
@@ -32,6 +37,34 @@ export function postavFlow(opts = {}) {
   if (!window.PointerEvent) window.PointerEvent = window.MouseEvent;
   // Chrome je ma, jsdom ne
   if (!window.structuredClone) window.structuredClone = (o) => JSON.parse(JSON.stringify(o));
+
+  // Predlohy stoji na trech vecech, ktere jsdom nema - bez nich by se testoval
+  // jen prazdny prostor.
+  if (!window.DataTransfer) {
+    window.DataTransfer = class {
+      constructor() {
+        const soubory = [];
+        this.items = { add: (f) => soubory.push(f) };
+        this.files = soubory;
+      }
+    };
+  }
+  if (!window.DragEvent) {
+    window.DragEvent = class extends window.MouseEvent {
+      constructor(typ, init = {}) {
+        super(typ, init);
+        this.dataTransfer = init.dataTransfer || null;
+      }
+    };
+  }
+  // Chrome umi input.files priradit, jsdom ma jen getter
+  const puvodniFiles = Object.getOwnPropertyDescriptor(
+    window.HTMLInputElement.prototype, "files");
+  Object.defineProperty(window.HTMLInputElement.prototype, "files", {
+    configurable: true,
+    get() { return this.__files || puvodniFiles?.get?.call(this) || null; },
+    set(v) { this.__files = v; },
+  });
 
   // jsdom nema layout, takze si obdelniky rozdame sami
   const rects = new WeakMap();
@@ -54,6 +87,10 @@ export function postavFlow(opts = {}) {
     hlaseni: [],
     popoverOtevren: false,
     mediaCitac: 0,
+    nahrano: [],           // co pristalo v knihovne projektu
+    predlohy: [],          // co se z knihovny opravdu pripojilo k promptu
+    podstrceneCesty: [],   // cesty, ktere rozsireni dodalo do dialogu
+    ulozenePredlohy: [],   // co si nechal na disk ulozit mustek (predlohy z panelu)
   };
 
   // --- ovladaci pruh -------------------------------------------------------
@@ -77,6 +114,126 @@ export function postavFlow(opts = {}) {
   obnovNastaveni();
   pruh.append(editor, btnNastaveni, btnPomocne, btnOdeslat);
   document.body.appendChild(pruh);
+
+  // --- predlohy ------------------------------------------------------------
+  // Odmereno na zive strance Flow (1. 9.):
+  //   - do vstupu na soubory se ze stranky zapsat neda: ten, na ktery sahá
+  //     "Upload media", vznika az pri kliknuti a hned se zahazuje,
+  //   - soubor se dostane dovnitr jen dialogem na vyber souboru, ktery
+  //     rozsireni zachytava ladicim rozhranim,
+  //   - nahrany obrazek pristane v knihovne projektu, NE v promptu,
+  //   - k promptu ho pripoji az "More" -> "Add to prompt" na jeho karte,
+  //   - nahledy maji adresu media.getMediaUrlRedirect, ne blob:.
+  const knihovna = document.createElement("div");
+  const nahledy = document.createElement("div");
+  pruh.appendChild(nahledy);
+  document.body.appendChild(knihovna);
+
+  let mediaId = 0;
+  /* Nahrana media se do DOM vykresli az s otevrenym vyberem medii - naostro
+     to bez nej vypada, ze nahrani selhalo. */
+  const nahrajDoKnihovny = (soubory) => {
+    if (!vyberOtevren) return;
+    for (const f of soubory || []) {
+      stav.nahrano.push(typeof f === "string" ? { path: f, name: f.split(/[\\/]/).pop() } : f);
+      const karta = document.createElement("div");
+      karta.className = "sc-karta";
+      const obal = document.createElement("div");
+      const im = document.createElement("img");
+      im.src = `https://labs.google/fx/api/trpc/media.getMediaUrlRedirect?name=m${++mediaId}`;
+      im.dataset.jmeno = String(f).split(/[\\/]/).pop();
+      obal.appendChild(im);
+
+      const pripoj = () => {
+        stav.predlohy.push({ name: im.dataset.jmeno });
+        const n = document.createElement("img");
+        n.src = im.src;
+        nahledy.appendChild(n);
+      };
+
+      /* Ve vyberu medii ma karta tlacitko rovnou (a jinou velikost pismen
+         nez nabidka pod "More") - naostro je to presne takhle. */
+      const primo = document.createElement("button");
+      primo.textContent = "Add to Prompt";
+      dejRect(primo, 90, 24);
+      primo.addEventListener("pointerdown", pripoj);
+
+      const more = document.createElement("button");
+      more.textContent = "more_vert More";
+      dejRect(more, 24, 24);
+      // nabidka se rozbali az po najeti mysi na kartu
+      let najeto = false;
+      karta.addEventListener("mouseover", () => { najeto = true; });
+      more.addEventListener("pointerdown", () => {
+        if (!najeto) return;                  // bez hoveru se nabidka neotevre
+        const menu = document.createElement("div");
+        menu.className = "sc-menu";
+        for (const popisek of ["favorite Favorite", "add Add to prompt",
+                               "delete Move to trash"]) {
+          const b = document.createElement("button");
+          b.textContent = popisek;
+          dejRect(b, 120, 26);
+          b.addEventListener("pointerdown", () => {
+            if (/Add to prompt/i.test(popisek)) pripoj();
+            menu.remove();
+          });
+          menu.appendChild(b);
+        }
+        document.body.appendChild(menu);
+      });
+      karta.append(obal, ...(opts.jenNabidkaMore ? [more] : [primo, more]));
+      knihovna.appendChild(karta);
+    }
+  };
+
+  /* Vyber medii: "Create" ho otevre a teprve v nem je "Upload media".
+     Klik na nej otevre dialog na vyber souboru - ten u nas predstavuje
+     zprava attachFiles, kterou obslouzi napodoba service workeru niz. */
+  let vyberOtevren = false;
+  const btnCreate = document.createElement("button");
+  btnCreate.textContent = "add_2 Create";
+  dejRect(btnCreate, 60, 30);
+  pruh.insertBefore(btnCreate, btnNastaveni);
+
+  const btnUpload = document.createElement("button");
+  btnUpload.textContent = "upload Upload media";
+  dejRect(btnUpload, 120, 30);
+
+  const zavriVyber = () => {
+    vyberOtevren = false;
+    btnUpload.remove();
+  };
+  btnCreate.addEventListener("pointerdown", () => {
+    if (opts.bezVyberuMedii) return;
+    if (vyberOtevren) { zavriVyber(); return; }   // druhy klik ho zavre
+    vyberOtevren = true;
+    document.body.appendChild(btnUpload);
+  });
+  // vyber medii zavira i Escape
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && vyberOtevren) zavriVyber();
+  });
+  if (opts.vyberRovnou && !opts.bezVyberuMedii) {
+    vyberOtevren = true;
+    document.body.appendChild(btnUpload);
+  }
+
+  /* Vstup, na kterem visi React - jen ten je ten pravy. Zapisem ze stranky
+     s nim nehne nic (naostro taky ne), soubory na nej dostane az ladici
+     rozhrani, ktere si ho najde podle znacky data-flowbridge-cil. */
+  if (!opts.bezVstupuSouboru) {
+    const vstup = document.createElement("input");
+    vstup.type = "file";
+    vstup.accept = "image/*";
+    vstup.multiple = true;
+    vstup.__reactProps$test = { onChange: () => {} };
+    document.body.appendChild(vstup);
+  }
+
+  /* Soubory nastavi ladici rozhrani primo na vstup - zadny dialog se
+     neotevira. Nahrani chvili trva, stejne jako naostro. */
+  const nahrajPozdeji = (paths) =>
+    setTimeout(() => nahrajDoKnihovny(paths), opts.dobaNahrani ?? 200);
 
   // --- prompt jde zapsat jen pres beforeinput ------------------------------
   let text = "";
@@ -137,9 +294,12 @@ export function postavFlow(opts = {}) {
   function spustGenerovani() {
     if (!text.trim()) return false;
     const pocet = stav.nastaveni.typ === "Video" ? 1 : stav.nastaveni.pocet;
-    stav.odeslano.push({ prompt: text, pocet, typ: stav.nastaveni.typ });
+    stav.odeslano.push({ prompt: text, pocet, typ: stav.nastaveni.typ,
+                         predlohy: nahledy.children.length });
     text = "";
     prekresli();
+    // Flow po odeslani predlohy zahodi - dalsi davka si je musi pripojit znovu
+    nahledy.innerHTML = "";
     stav.generuje = true;
     progress = document.createElement("div");
     progress.setAttribute("role", "progressbar");
@@ -181,10 +341,12 @@ export function postavFlow(opts = {}) {
   window.__posliNet = posliNet;
 
   // --- chrome API ----------------------------------------------------------
-  const uloziste = {};
+  const uloziste = opts.uloziste || {};   // prezije 'obnoveni stranky'
   const posluchaci = [];
   window.chrome = {
     runtime: {
+      // podle nej content.js pozna, ze rozsireni nebylo mezitim nacteno znovu
+      id: "flowbridge-test",
       getManifest: () => ({ version: "test" }),
       onMessage: { addListener: (f) => posluchaci.push(f) },
       async sendMessage(msg) {
@@ -210,6 +372,23 @@ export function postavFlow(opts = {}) {
           case "uploadToBridge":
             stav.stazeno.push("můstek:" + msg.tag + "/" + msg.name);
             return { ok: true, path: "C:/outputs/" + msg.tag + "/" + msg.name };
+          case "attachFiles": {
+            if (opts.ladeniSelze) return { ok: false, error: "test: ladicí rozhraní zakázáno" };
+            // ladici rozhrani si vstup najde podle znacky od content.js
+            const cil = document.querySelector('input[data-flowbridge-cil]');
+            if (!cil) {
+              return { ok: false, error: "označený vstup pro soubory se v DOM nenašel" };
+            }
+            stav.podstrceneCesty.push(...msg.paths);
+            nahrajPozdeji(msg.paths);
+            return { ok: true, files: msg.paths.length };
+          }
+          case "refToDisk": {
+            if (opts.predlohaSelze) return { ok: false, error: "test: můstek neuložil" };
+            const cesta = "C:/outputs/_predlohy/" + msg.name;
+            stav.ulozenePredlohy.push(cesta);
+            return { ok: true, path: cesta, bytes: 70 };
+          }
           case "diag":
             return { ok: true, umiLadit: true, pripojeno: [1], posledniChyba: "" };
           case "bridgePull":
@@ -240,5 +419,40 @@ export function postavFlow(opts = {}) {
     window.eval(kod);
   };
 
-  return { dom, window, document, stav, nastavStav, spustContent, posliNet };
+  // --- ovladani panelu (na to, co dela uzivatel mysi) -----------------------
+
+  const klikni = async (sel) => {
+    const el = document.querySelector(sel);
+    if (!el) throw new Error("v panelu není " + sel);
+    el.click();
+    await new Promise((r) => setTimeout(r, 50));
+  };
+
+  /* Dialog na vyber souboru otevrit nejde, takze soubory podstrcime rovnou -
+     panel pak jede stejnou cestou jako po skutecnem vyberu. */
+  const vyberPredlohy = async (items) => {
+    const inp = document.querySelector("#fb-files");
+    if (!inp) throw new Error("panel nemá pole na předlohy");
+    inp.files = items.map((it) => {
+      const [hlava, b64] = it.dataUrl.split(",");
+      const bin = window.atob(b64);
+      const bajty = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bajty[i] = bin.charCodeAt(i);
+      return new window.File([bajty], it.name,
+        { type: /:(.*?);/.exec(hlava)?.[1] || "image/png" });
+    });
+    inp.dispatchEvent(new window.Event("change", { bubbles: true }));
+    // panel soubory cte pres FileReader - musime pockat, az dobehne
+    for (let i = 0; i < 60; i++) {
+      await new Promise((r) => setTimeout(r, 50));
+      if (document.querySelector("#fb-reflist")?.children.length === items.length) return;
+    }
+    throw new Error("panel předlohy nepřevzal");
+  };
+
+  const ulozene = () => uloziste.flowbridge;
+  const ulozenePredlohy = () => uloziste.flowbridgeRefs || {};
+
+  return { dom, window, document, stav, nastavStav, spustContent, posliNet,
+           uloziste, ulozene, ulozenePredlohy, klikni, vyberPredlohy };
 }

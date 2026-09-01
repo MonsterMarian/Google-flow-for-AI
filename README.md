@@ -56,6 +56,70 @@ Stažené soubory / FlowBridge / <složka> / <prompt>-<id> / 001.png
 
 ---
 
+## Obrázek do promptu (předlohy)
+
+K promptu jde připojit až **6 obrázků jako předlohu** — pro udržení postavy,
+produktu nebo stylu napříč sérií, a u videa jako výchozí snímek
+(image-to-video).
+
+**V panelu:** u pole *předlohy* vyber soubory. Zůstanou vybrané i po
+*Přidat do fronty*, takže na jednu postavu můžeš navěsit prompty jeden
+po druhém; křížkem u názvu je odebereš.
+
+**Z příkazové řádky** (`--ref` lze opakovat):
+
+```bash
+python -m flowbridge add "ta samá postava, jak pije kafe" --ref C:/obrazky/postava.png
+```
+
+```bash
+python -m flowbridge addfile scenar.txt --ref C:/obrazky/postava.png --tag film
+```
+
+**Z agenta** — `flow_enqueue_image`, `flow_enqueue_video` i `flow_enqueue_many`
+berou `refs` jako seznam absolutních cest.
+
+### Jak to Flow doopravdy bere
+
+Změřeno na živé stránce (1. 9. 2026) — nic z toho není odhad:
+
+1. **Otevřít výběr médií** (`Create` v ovládacím pruhu). Bez něj Flow nahraný
+   obrázek nikde nevykreslí a nahrání vypadá, že selhalo.
+2. **Nahrát soubor.** Zápis do `input.files` ze stránky Flow ignoruje —
+   rozšíření proto použije ladicí rozhraní (`DOM.setFileInputFiles`), které
+   soubory nastaví na úrovni prohlížeče. Flow dostane stejnou událost jako
+   od člověka. Žádný systémový dialog se neotevírá.
+3. **Z knihovny do promptu.** Nahraný obrázek je zatím jen v Uploads; předlohou
+   se stane až tlačítkem **Add to Prompt** na jeho kartě (v seznamu médií je
+   totéž schované pod `More`). Rozšíření zkouší obě cesty.
+4. **Zavřít výběr médií** — jinak překrývá ovládací pruh a prompt by se
+   neodeslal.
+
+Náhled připojené předlohy má v pruhu adresu `media.getMediaUrlRedirect`.
+Za připojenou se počítá jen ta, které pak v pruhu opravdu přibude náhled —
+kliknutí do nabídky samo o sobě nic nedokazuje.
+
+**Když se předlohu nepodaří připojit, dávka se neodešle.** Obrázek bez
+předlohy je jiný obrázek a u videa navíc utracené kredity.
+
+### Jak se obrázek dostane do prohlížeče
+
+`DOM.setFileInputFiles` umí pracovat jen se souborem **na disku**, ne s bajty.
+Proto:
+
+- **úlohy od agentů a z příkazové řádky** nesou rovnou cestu k souboru; můstek
+  ji posílá v `/ext/pull`. Soubor musí zůstat na místě, dokud úloha nedoběhne.
+- **předlohy vybrané v panelu** má prohlížeč jen jako bajty (skutečnou cestu
+  neprozradí), takže je nejdřív pošle můstku, ten je uloží do
+  `outputs/_předlohy` a vrátí cestu. **Bez běžícího můstku proto předlohy
+  z panelu nefungují** — u úloh od agentů to nevadí.
+
+Bajty vybrané v panelu leží v `chrome.storage` mimo stav panelu, aby se
+megabajty nepřepisovaly při každém řádku logu; uklidí se, jakmile úloha zmizí
+z fronty.
+
+---
+
 ## Velká zakázka: 1000 obrázků z 50 promptů
 
 ```bash
@@ -138,9 +202,9 @@ složce spustíš relaci. Pro jiného klienta zaregistruj:
 
 | Nástroj | K čemu |
 |---|---|
-| `flow_enqueue_image` | zařadí obrázky (1–12 ks) |
-| `flow_enqueue_video` | zařadí video |
-| `flow_enqueue_many` | celý storyboard / série variant naráz |
+| `flow_enqueue_image` | zařadí obrázky (1–12 ks), volitelně s předlohami |
+| `flow_enqueue_video` | zařadí video, volitelně z výchozího obrázku |
+| `flow_enqueue_many` | celý storyboard / série variant naráz (i se stejnými předlohami) |
 | `flow_job` | stav úlohy + soubory |
 | `flow_list_jobs` | výpis fronty s filtry |
 | `flow_queue_status` | souhrn: fronta, kredity |
@@ -264,19 +328,25 @@ aniž by kdy viděl tvou obrazovku.
 
 **Ověřeno proti živému Flow** (přečteno z běžící stránky):
 
+- celá cesta předlohy: výběr médií → `DOM.setFileInputFiles` → knihovna →
+  „Add to Prompt" → náhled v ovládacím pruhu,
 - interní API Flow — přihlášení, zůstatek kreditů, katalog modelů s cenami,
 - struktura ovládacího panelu: prompt je `contenteditable`, popover s volbami
   Image/Video, poměry 16:9 / 4:3 / 1:1 / 3:4 / 9:16, výběr modelu, počty x1–x4
   a řádek s cenou v kreditech.
 
 **Ověřeno testy proti napodobě stránky** (`tests/`, viz níže) — motor fronty,
-dávkování, dopočet chybějících kusů, stahování včetně náhradní cesty, autopilot
-a automatická diagnostika.
+dávkování, dopočet chybějících kusů, stahování včetně náhradní cesty, autopilot,
+automatická diagnostika a celá cesta předlohy od můstku až k odeslanému promptu.
 
 **Zatím neověřeno živým během:**
 
 - že popisky tlačítek a tvar odpovědí ve Flow odpovídají tomu, co selektory
-  a odposlech čekají.
+  a odposlech čekají,
+- nic zásadního. Předlohy jsou proti živému Flow proměřené krok po kroku
+  (viz „Jak to Flow doopravdy bere"); diagnostika hlásí každou fázi zvlášť:
+  jestli se našel reactový vstup, jestli je otevřený výběr médií, kolik je
+  médií v knihovně a kolik náhledů v pruhu.
 
 První běh proto pusť s dohledem — obrázky jsou zdarma, takže test nic nestojí.
 Zadej jeden prompt, počet 4, a koukni do logu dole v panelu. Když se některý
@@ -287,11 +357,19 @@ uloží diagnostiku**; nic se nerozbije.
 
 Motor fronty jede proti napodobě stránky Flow, která se chová podle všeho, co
 je o něm zjištěno naostro (prompt jen přes `beforeinput`, `aria-disabled` na
-tlačítku, popover, důvěryhodné odeslání). Nepotřebuje prohlížeč ani přihlášení.
+tlačítku, popover, důvěryhodné odeslání, skrytý vstup na soubory). Nepotřebuje
+prohlížeč ani přihlášení.
 
 ```bash
 cd tests && npm install && npm test
 ```
+
+Dvanáct scénářů: dávkování na 3×4, video a kredity, náhradní Enter,
+zablokované stahování, dopočet chybějících kusů, autopilot, rozbité Flow
+s diagnostikou — a pět na předlohy: že je nese každá dávka, že se bez nich nic
+neodešle, že se cesty berou z můstku, že ty z panelu přežijí obnovení stránky
+a pak se z úložiště uklidí, a že se předloha připojí i tou druhou cestou
+(nabídkou `More`).
 
 ---
 
@@ -306,6 +384,8 @@ cd tests && npm install && npm test
 | nestahuje se | zkontroluj v Chrome oprávnění ke stahování; se zapnutým můstkem se to zkusí i druhou cestou (uloží to server) |
 | můstek nefunguje | běží `python -m flowbridge dashboard`? Je můstek v panelu na „zap"? |
 | nic se nespustí | `python -m flowbridge status` řekne, jestli se prohlížeč hlásí, je v projektu a co naposled dělal |
+| „Flow na odeslání nezareagoval" | důvěryhodný klik prošel, ale Flow negeneruje. Zkontroluj, že v Chrome nahoře svítí lišta o ladění (bez ní odesílání nefunguje) a že na kartě nejsou otevřené DevTools. Týká se to i úloh bez předloh — s nimi to nesouvisí. |
+| předloha se nepřipojila | v dumpu (`python -m flowbridge dump`) je sekce `predlohy`: jestli se našel reactový vstup, jestli je otevřený výběr médií, kolik je médií v knihovně a kolik náhledů v pruhu |
 
 Selektory hledají prvky **podle textu**, ne podle CSS tříd, takže drobná změna
 vzhledu Flow je nerozbije. Když Google přejmenuje tlačítka, vezmi si dump

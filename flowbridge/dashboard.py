@@ -7,6 +7,7 @@ import json
 import re
 import shutil
 from pathlib import Path
+from urllib.parse import quote
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
@@ -78,6 +79,7 @@ def api_state() -> JSONResponse:
         j["created_at_h"] = _ts(j["created_at"])
         j["finished_at_h"] = _ts(j.get("finished_at"))
         j["delivered"] = len(j.get("result_files") or [])
+        j["refs_count"] = len(j.get("refs") or [])
     return JSONResponse({
         "worker": {
             "running": bool(hb and now - hb < 30),
@@ -120,12 +122,17 @@ def api_project(body: ProjectBody) -> dict[str, Any]:
 @app.post("/api/jobs")
 def api_add(job: NewJob) -> dict[str, Any]:
     db.init()
+    # Predlohu ma rozsireni pripojit k promptu - kdyz chybi uz ted, uloha by
+    # jen zbytecne prosla frontou a spadla az v prohlizeci.
+    missing = [r for r in job.refs if not Path(r).is_file()]
+    if missing:
+        raise HTTPException(status_code=400, detail=f"Předloha neexistuje: {missing[0]}")
     limit = 12 if job.kind == "image" else 8
     job_id = db.add_job(
         kind=job.kind, prompt=job.prompt, model=job.model,
         count=max(1, min(job.count, limit)), aspect=job.aspect,
-        duration=job.duration, refs=job.refs, tag=job.tag,
-        priority=job.priority, source="dashboard",
+        duration=job.duration, refs=[str(Path(r).resolve()) for r in job.refs],
+        tag=job.tag, priority=job.priority, source="dashboard",
     )
     return {"ok": True, "job_id": job_id}
 
@@ -178,6 +185,52 @@ def _requeue_stale() -> int:
     return cur.rowcount
 
 
+def _ref_links(job: dict[str, Any]) -> list[dict[str, str]]:
+    """Predlohy pro rozsireni: jmeno, cesta na disku a zalozni adresa.
+
+    Rozhodujici je `path`. Rozsireni predlohu podstrkuje pres ladici rozhrani
+    prohlizece a to umi pracovat jen se souborem na disku - bajty by mu byly
+    k nicemu. Soubor proto musi zustat na miste, dokud uloha nedobehne.
+
+    Chybejici soubor se jen ohlasi - uloha se stejne neodesle, protoze
+    rozsireni odmitne generovat bez predlohy, ktera k promptu patri.
+    """
+    links: list[dict[str, str]] = []
+    for i, raw in enumerate(job.get("refs") or []):
+        path = Path(raw)
+        if not path.is_file():
+            db.log(f"předloha chybí na disku: {raw}", job_id=job["id"], level="warn")
+        links.append({
+            "name": path.name,
+            "path": str(path),
+            "url": f"/ext/ref?job={quote(job['id'])}&i={i}",
+        })
+    return links
+
+
+@app.get("/ext/ref")
+def ext_ref(job: str, i: int = 0) -> FileResponse:
+    """Vyda jednu predlohu dane ulohy jako soubor.
+
+    Rozsireni si predlohy bere z disku (viz `path` v /ext/pull), takze tohle
+    je hlavne na nahled a na overeni, ze na cestu opravdu nekdo dosahne.
+
+    Cesta se bere z databaze, ne z dotazu - pres tenhle endpoint proto nejde
+    precist libovolny soubor na disku, jen to, co uz nekdo do fronty zadal.
+    """
+    db.init()
+    row = db.get_job(job)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Úloha neexistuje.")
+    refs = row.get("refs") or []
+    if not 0 <= i < len(refs):
+        raise HTTPException(status_code=404, detail="Taková předloha u úlohy není.")
+    path = Path(refs[i])
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail=f"Soubor {path.name} na disku chybí.")
+    return FileResponse(path)
+
+
 @app.get("/ext/pull")
 def ext_pull(limit: int = 3) -> dict[str, Any]:
     db.init()
@@ -203,6 +256,9 @@ def ext_pull(limit: int = 3) -> dict[str, Any]:
             "aspect": job.get("aspect"),
             "duration": job.get("duration"),
             "tag": job.get("tag"),
+            # Predlohy jdou jako cesty na disku - rozsireni je Flow podstrci
+            # pres ladici rozhrani, ktere s bajty pracovat neumi.
+            "refs": _ref_links(job),
         })
     if out:
         db.log(f"můstek vydal {len(out)} úloh rozšíření")
@@ -455,6 +511,9 @@ PAGE = """<!doctype html>
   .ev.warn{color:var(--warn)} .ev.error{color:var(--err)}
   .bar{height:5px;background:#1e1e24;border-radius:3px;overflow:hidden;margin-top:6px}
   .bar>i{display:block;height:100%;background:var(--acc)}
+  .refs{display:inline-block;margin-left:6px;padding:1px 6px;border-radius:9px;
+        font-size:10.5px;color:var(--acc);border:1px solid var(--line)}
+  .hint{font-size:11px;color:var(--dim);margin-top:5px}
 </style></head><body>
 
 <header>
@@ -506,8 +565,10 @@ PAGE = """<!doctype html>
       <label>model (prázdné = výchozí)</label><input id="f-model" list="models" placeholder="Nano Banana 2">
       <datalist id="models"></datalist>
       <label>tag / projekt</label><input id="f-tag" value="default">
-      <label>předlohy – cesty k souborům, po jedné na řádek</label>
-      <textarea id="f-refs" style="min-height:52px"></textarea>
+      <label>předlohy – cesty k obrázkům na disku, po jedné na řádek</label>
+      <textarea id="f-refs" style="min-height:52px"
+        placeholder="C:/Users/ja/Obrazky/predloha.png"></textarea>
+      <div class="hint">Rozšíření je před odesláním připojí k promptu ve Flow.</div>
       <div style="margin-top:12px"><button id="btn-add">Přidat do fronty</button></div>
     </div>
 
@@ -520,6 +581,9 @@ PAGE = """<!doctype html>
 <script>
 const $ = s => document.querySelector(s);
 let paused = false;
+
+// 1 předloha, 2-4 předlohy, 5+ předloh
+const predloh = n => n === 1 ? 'předloha' : (n < 5 ? 'předlohy' : 'předloh');
 
 async function refresh(){
   const st = await (await fetch('/api/state')).json();
@@ -576,6 +640,7 @@ async function refresh(){
       '<td>'+(j.kind==='video'?'video':'obr.')+'</td>' +
       '<td>'+j.delivered+'/'+j.count+'</td>' +
       '<td class="prompt">'+esc(j.prompt) +
+        (j.refs_count ? '<span class="refs">'+j.refs_count+'&nbsp;'+predloh(j.refs_count)+'</span>' : '') +
         (j.error ? '<div style="color:#f87171;font-size:11px">'+esc(j.error)+'</div>' : '') +
         (j.status==='running' ? '<div class="bar"><i style="width:'+pct+'%"></i></div>' : '') +
         (files ? '<div class="thumbs">'+files+'</div>' : '') + '</td>' +

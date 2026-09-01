@@ -32,6 +32,21 @@ server = _Server(
 MAX_IMAGES_AT_ONCE = 12  # 3 davky po 4 = strop, ktery Flow spolehlive unese
 
 
+def _check_refs(refs: list[str] | None) -> tuple[list[str], str | None]:
+    """Overi predlohy a prevede je na absolutni cesty.
+
+    Bajty si pak vyzvedne rozsireni pres mustek (/ext/ref) - do prohlizece
+    se posilaji az tesne pred odeslanim promptu, ne pri zarazeni do fronty.
+    """
+    out: list[str] = []
+    for raw in refs or []:
+        path = Path(raw)
+        if not path.is_file():
+            return [], f"Předloha neexistuje: {raw}"
+        out.append(str(path.resolve()))
+    return out, None
+
+
 def _ts(value: float | None) -> str | None:
     return dt.datetime.fromtimestamp(value).isoformat(timespec="seconds") if value else None
 
@@ -47,6 +62,7 @@ def _job_view(job: dict[str, Any]) -> dict[str, Any]:
         "delivered": len(job.get("result_files") or []),
         "tag": job.get("tag"),
         "aspect": job.get("aspect"),
+        "refs": job.get("refs") or [],
         "credits_spent": job.get("credits_spent"),
         "output_dir": job.get("output_dir"),
         "files": job.get("result_files") or [],
@@ -95,17 +111,18 @@ def flow_enqueue_image(
     """
     db.init()
     count = max(1, min(int(count), MAX_IMAGES_AT_ONCE))
-    bad = [r for r in (refs or []) if not Path(r).exists()]
-    if bad:
-        return {"ok": False, "error": f"Předloha neexistuje: {bad[0]}"}
+    paths, error = _check_refs(refs)
+    if error:
+        return {"ok": False, "error": error}
 
     job_id = db.add_job(
         kind="image", prompt=prompt, model=model, count=count, aspect=aspect,
-        refs=[str(Path(r).resolve()) for r in (refs or [])], tag=tag,
+        refs=paths, tag=tag,
         priority=priority, not_before=_parse_at(at), source="mcp",
     )
     return {"ok": True, "job_id": job_id, "kind": "image", "count": count,
-            "credits": 0, "note": "Obrázky jsou zdarma. Stav zjistíš přes flow_job."}
+            "refs": len(paths), "credits": 0,
+            "note": "Obrázky jsou zdarma. Stav zjistíš přes flow_job."}
 
 
 @server.tool()
@@ -137,19 +154,19 @@ def flow_enqueue_video(
         at: Kdy nejdriv odeslat - "+2h", "03:00", "2026-08-28 03:00".
     """
     db.init()
-    bad = [r for r in (refs or []) if not Path(r).exists()]
-    if bad:
-        return {"ok": False, "error": f"Předloha neexistuje: {bad[0]}"}
+    paths, error = _check_refs(refs)
+    if error:
+        return {"ok": False, "error": error}
 
     job_id = db.add_job(
         kind="video", prompt=prompt, model=model, count=max(1, int(count)),
         aspect=aspect, duration=int(duration),
-        refs=[str(Path(r).resolve()) for r in (refs or [])], tag=tag,
+        refs=paths, tag=tag,
         priority=priority, not_before=_parse_at(at), source="mcp",
     )
     balance = db.get_state("credits_balance")
     return {"ok": True, "job_id": job_id, "kind": "video", "duration": duration,
-            "credit_balance": balance,
+            "refs": len(paths), "credit_balance": balance,
             "note": "Přesnou cenu ověří worker před odesláním."}
 
 
@@ -160,6 +177,8 @@ def flow_enqueue_many(
     count: int = 4,
     model: str | None = None,
     aspect: str | None = None,
+    refs: list[str] | None = None,
+    duration: int | None = None,
     tag: str = "default",
     priority: int = 100,
 ) -> dict[str, Any]:
@@ -171,19 +190,26 @@ def flow_enqueue_many(
         count: Kolik kusu na jeden prompt.
         model: Nazev modelu; vychozi z konfigurace.
         aspect: Pomer stran.
+        refs: Absolutni cesty k predloham. Stejne predlohy dostane kazdy prompt -
+            hodi se na serii variant jedne postavy nebo produktu.
+        duration: Delka videa v sekundach (jen kind="video").
         tag: Nazev projektu - urcuje podslozku ve vystupech.
         priority: Nizsi cislo = drivejsi zpracovani.
     """
     db.init()
     if kind not in ("image", "video"):
         return {"ok": False, "error": "kind musí být 'image' nebo 'video'"}
+    paths, error = _check_refs(refs)
+    if error:
+        return {"ok": False, "error": error}
     limit = MAX_IMAGES_AT_ONCE if kind == "image" else 8
     ids = [
         db.add_job(kind=kind, prompt=p, model=model, count=max(1, min(int(count), limit)),
-                   aspect=aspect, tag=tag, priority=priority, source="mcp")
+                   aspect=aspect, duration=duration, refs=paths, tag=tag,
+                   priority=priority, source="mcp")
         for p in prompts if p.strip()
     ]
-    return {"ok": True, "job_ids": ids, "queued": len(ids)}
+    return {"ok": True, "job_ids": ids, "queued": len(ids), "refs": len(paths)}
 
 
 # ---------------------------------------------------------------------------

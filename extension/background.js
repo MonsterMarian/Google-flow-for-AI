@@ -145,6 +145,55 @@ async function trustedClick(tabId, x, y) {
   }
 }
 
+/* ---------------------------------------------------------------------------
+ * Predlohy: podstrceni souboru do dialogu na vyber souboru
+ *
+ * Ze stranky se do nahravaciho vstupu Flow zapsat neda - zmereno naostro:
+ * prirazeni .files nahravani nespusti. DOM.setFileInputFiles ale nastavi
+ * soubory na urovni prohlizece, takze Flow dostane duveryhodnou udalost,
+ * uplne stejnou jako kdyz soubor vybere clovek. Zadny dialog se neotevre.
+ *
+ * Vstup existuje jen dokud je otevreny vyber medii ("Create" v ovladacim
+ * pruhu) - o to se stara content.js.
+ *
+ * DOM.setFileInputFiles bere cesty na disku, ne bajty - proto predlohy
+ * musi lezet v souboru.
+ * ------------------------------------------------------------------------- */
+
+/* Ktery z vstupu na strance je ten pravy, pozna jen obsahovy skript - ridi se
+   tim, ze na nem visi React (a ze neni nas vlastni). Ladici rozhrani na
+   vlastnosti JS nedosahne, takze si ho content.js oznaci timhle atributem
+   a my ho najdeme podle nej. */
+const CIL_ATRIBUT = "data-flowbridge-cil";
+
+async function attachFiles(tabId, paths) {
+  if (!Array.isArray(paths) || !paths.length) {
+    return { ok: false, error: "žádné cesty k předlohám" };
+  }
+  if (!(await ensureDebugger(tabId))) {
+    return { ok: false, error: lastAttachError || "nepodařilo se připojit ladicí rozhraní" };
+  }
+
+  try {
+    await chrome.debugger.sendCommand({ tabId }, "DOM.enable");
+    const { root } = await chrome.debugger.sendCommand({ tabId }, "DOM.getDocument",
+      { depth: 0 });
+    const { nodeId } = await chrome.debugger.sendCommand({ tabId }, "DOM.querySelector",
+      { nodeId: root.nodeId, selector: `input[${CIL_ATRIBUT}]` });
+
+    if (!nodeId) return { ok: false, error: "označený vstup pro soubory se v DOM nenašel" };
+
+    // Tohle nastavi soubory na urovni prohlizece, takze Flow dostane
+    // duveryhodnou udalost - stejnou, jako kdyz soubor vybere clovek.
+    // Zapis .files ze stranky Flow ignoruje, tohle ne.
+    await chrome.debugger.sendCommand({ tabId }, "DOM.setFileInputFiles",
+      { nodeId, files: paths });
+    return { ok: true, files: paths.length };
+  } catch (e) {
+    return { ok: false, error: String(e?.message || e) };
+  }
+}
+
 function releaseDebugger(tabId) {
   if (!attached.has(tabId)) return;
   attached.delete(tabId);
@@ -218,6 +267,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg?.type === "uploadToBridge") {
     fetchAndUpload(msg.bridgeUrl, msg.url, msg.tag, msg.name).then(sendResponse);
+    return true;
+  }
+
+  if (msg?.type === "attachFiles") {
+    attachFiles(sender.tab.id, msg.paths).then(sendResponse);
+    return true;
+  }
+
+  if (msg?.type === "refToDisk") {
+    refToDisk(msg.bridgeUrl, msg.dataUrl, msg.name).then(sendResponse);
     return true;
   }
 
@@ -309,6 +368,45 @@ async function fetchAndUpload(bridgeUrl, url, tag, name) {
     });
     if (!up.ok) return { ok: false, error: "můstek HTTP " + up.status };
     return { ok: true, ...(await up.json()) };
+  } catch (e) {
+    return { ok: false, error: String(e?.message || e) };
+  }
+}
+
+/* Predloha z panelu na disk.
+ *
+ * DOM.setFileInputFiles umi podstrcit jen soubor, ktery na disku existuje.
+ * Predlohu vybranou v panelu ma ale prohlizec jen jako bajty - skutecnou
+ * cestu k ni prohlizec z bezpecnostnich duvodu nerekne. Posleme ji proto
+ * mustku, ktery ji ulozi a vrati cestu, na kterou uz ladici rozhrani dosahne.
+ *
+ * Bez beziciho mustku tudiz predlohy z panelu nejdou pouzit - u uloh od
+ * agentu to nevadi, tam cesta na disku uz existuje. */
+
+const MAX_REF_BYTES = 24 * 1024 * 1024;
+
+async function refToDisk(bridgeUrl, dataUrl, name) {
+  if (!bridgeUrl) return { ok: false, error: "můstek není zapnutý" };
+  if (!dataUrl) return { ok: false, error: "předloha nemá obsah" };
+  try {
+    const blob = await (await fetch(dataUrl)).blob();
+    if (!blob.size) return { ok: false, error: "předloha je prázdná" };
+    if (blob.size > MAX_REF_BYTES) {
+      return { ok: false, error: `předloha má ${Math.round(blob.size / 1048576)} MB `
+                                 + `(strop je ${MAX_REF_BYTES / 1048576} MB)` };
+    }
+    const dest = bridgeUrl.replace(/\/$/, "")
+      + "/ext/upload?tag=" + encodeURIComponent("_predlohy")
+      + "&name=" + encodeURIComponent(name || "predloha.png");
+    const up = await fetch(dest, {
+      method: "POST",
+      headers: { "Content-Type": "application/octet-stream" },
+      body: blob,
+    });
+    if (!up.ok) return { ok: false, error: "můstek HTTP " + up.status };
+    const data = await up.json();
+    if (!data?.path) return { ok: false, error: "můstek nevrátil cestu" };
+    return { ok: true, path: data.path, bytes: blob.size };
   } catch (e) {
     return { ok: false, error: String(e?.message || e) };
   }
