@@ -351,5 +351,28 @@ console.log("\n=== 12) Bez přímého tlačítka -> předlohu připojí nabídka
   f.window.close();
 }
 
+// ---------------------------------------------------------------------------
+console.log("\n=== 13) Nahraná předloha se nesmí vrátit mezi výsledky ===");
+{
+  // jeden kus, aby se predloha a vysledek praly o jedine misto ve vysledcich
+  const f = postavFlow({ dobaGenerovani: 2500 });
+  f.nastavStav({
+    running: true, log: [], settings: { ...RYCHLE },
+    jobs: [uloha({ count: 1, refs: [{ name: "predloha.png", path: "C:/p/predloha.png" }] })],
+  });
+  f.spustContent();
+  await dokud(() => f.stav.hlaseni.length > 0, 90000, "úloha nedoběhla");
+
+  ok("stáhl se jeden soubor", f.stav.stazeno.length === 1,
+     `staženo: ${f.stav.stazeno.length}`);
+  ok("nestáhla se předloha z knihovny",
+     f.stav.stazenoZ.every((u) => !/getMediaUrlRedirect/.test(u || "")),
+     JSON.stringify(f.stav.stazenoZ));
+  ok("stáhl se vygenerovaný obrázek",
+     f.stav.stazenoZ.every((u) => /googleusercontent|storage\.googleapis/.test(u || "")),
+     JSON.stringify(f.stav.stazenoZ));
+  f.window.close();
+}
+
 console.log(`\n${chyby ? `SELHALO: ${chyby} kontrol` : "Všechny kontroly prošly."}`);
 process.exit(chyby ? 1 : 0);

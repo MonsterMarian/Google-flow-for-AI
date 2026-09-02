@@ -602,6 +602,26 @@
 
   const mediaName = (src) => (String(src).match(/[?&]name=([^&]+)/) || [])[1] || null;
 
+  /* Nahrana predloha je pro Flow taky nove medium. Bez teto pamatovaci
+     mnoziny by ji cekani na vysledky sebralo misto vygenerovaneho obrazku -
+     a do vystupu by se ulozila predloha, kterou uz mas. */
+  const refMedia = new Set();
+
+  function zapamatujPredlohu(img) {
+    const src = img.currentSrc || img.src || "";
+    if (src) refMedia.add(src);
+    const n = mediaName(src);
+    if (n) refMedia.add(n);
+    // pojistka proti nekonecnemu rustu pri dlouhem behu
+    while (refMedia.size > 200) refMedia.delete(refMedia.values().next().value);
+  }
+
+  const jePredloha = (url) => {
+    if (refMedia.has(url)) return true;
+    const n = mediaName(url);
+    return !!n && refMedia.has(n);
+  };
+
   /* Znacka, podle ktere si service worker najde spravny vstup - viz
      background.js. Ze stranky ho vybrat umime, on ne. */
   const CIL_ATRIBUT = "data-flowbridge-cil";
@@ -668,14 +688,17 @@
   }
 
   async function openLibrary() {
-    // Uz otevreny? Znovu na "Create" klikat nesmime - zavrelo by se to.
-    if (!vyberOtevren()) {
-      const create = najdiPodleTextu(/^add_2 Create$/);
-      if (!create) return false;
-      realClick(create);
+    // Cerstve nactene Flow prvni klik obcas spolkne, tak to zkusime vickrat.
+    // Uz otevreny vyber ale znovu neotvirame - druhy klik ho zavre.
+    for (let pokus = 0; pokus < 3 && !vyberOtevren(); pokus++) {
+      const otvirac = najdiPodleTextu(/^add_2 Create$/)
+        || najdiPodleTextu(/^add Add Media$/);
+      if (!otvirac) return false;
+      realClick(otvirac);
       // Flow si vyber vykresluje se zpozdenim; par set milisekund nestaci.
-      if (!(await pockej(vyberOtevren, 8000, 400))) return false;
+      await pockej(vyberOtevren, 6000, 400);
     }
+    if (!vyberOtevren()) return false;
     // ve vyberu jeste prepneme na nahrana media, at je videt to nase
     if (!libraryMedia().length && clickByLabel("Uploads")) await sleep(900);
     return true;
@@ -830,6 +853,8 @@
     //    opravdu vidime v pruhu - klik do nabidky sam o sobe nic nedokazuje
     let pripojeno = 0;
     for (const img of nove().slice(0, paths.length)) {
+      // at se nam predloha nevrati mezi vysledky
+      zapamatujPredlohu(img);
       const pred = refThumbs().length;
       if (!(await addToPrompt(img))) {
         log("nabídka „Add to prompt“ se u předlohy neotevřela", "warn");
@@ -879,6 +904,8 @@
 
     const add = (url) => {
       if (found.includes(url)) return;
+      // predlohy jsme do projektu nahráli sami - nejsou to vysledky
+      if (jePredloha(url)) return;
       found.push(url);
       lastChange = Date.now();
     };

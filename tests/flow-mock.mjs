@@ -89,6 +89,7 @@ export function postavFlow(opts = {}) {
     mediaCitac: 0,
     nahrano: [],           // co pristalo v knihovne projektu
     predlohy: [],          // co se z knihovny opravdu pripojilo k promptu
+    stazenoZ: [],          // adresy, ze kterych se stahovalo
     podstrceneCesty: [],   // cesty, ktere rozsireni dodalo do dialogu
     ulozenePredlohy: [],   // co si nechal na disk ulozit mustek (predlohy z panelu)
   };
@@ -367,6 +368,7 @@ export function postavFlow(opts = {}) {
           case "download": {
             if (opts.stahovaniSelze) return { ok: false, error: "test: stahování zablokováno" };
             stav.stazeno.push(msg.filename);
+            stav.stazenoZ.push(msg.url);      // odkud - at je poznat predloha
             return { ok: true, path: "C:/Downloads/" + msg.filename };
           }
           case "uploadToBridge":
