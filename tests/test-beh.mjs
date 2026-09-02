@@ -374,5 +374,29 @@ console.log("\n=== 13) Nahraná předloha se nesmí vrátit mezi výsledky ===")
   f.window.close();
 }
 
+// ---------------------------------------------------------------------------
+console.log("\n=== 14) Karta se dorenderuje pozdě -> připojení to zkusí znovu ===");
+{
+  const f = postavFlow({ dobaGenerovani: 600, kartaSeRenderujePozdeji: true });
+  f.nastavStav({
+    running: true, log: [], settings: { ...RYCHLE },
+    jobs: [uloha({ count: 4, refs: [{ name: "pozdni.png", path: "C:/p/pozdni.png" }] })],
+  });
+  f.spustContent();
+  await dokud(() => f.stav.hlaseni.length > 0, 90000, "úloha nedoběhla");
+
+  ok("předloha se připojila", f.stav.predlohy[0]?.name === "pozdni.png",
+     JSON.stringify(f.stav.predlohy.map((p) => p.name)));
+  ok("dávka se odeslala i s ní",
+     f.stav.odeslano.length === 1 && f.stav.odeslano[0].predlohy === 1,
+     JSON.stringify(f.stav.odeslano.map((o) => o.predlohy)));
+  // bez opakovani uvnitr addToPrompt by prvni davka propadla a do logu
+  // by se zapsalo varovani - dohnala by to az dalsi vlna
+  const varovani = (f.ulozene()?.log || []).filter((e) => /Add to prompt/i.test(e.msg));
+  ok("zvládlo to bez propadlé dávky", varovani.length === 0,
+     JSON.stringify(varovani.map((e) => e.msg)));
+  f.window.close();
+}
+
 console.log(`\n${chyby ? `SELHALO: ${chyby} kontrol` : "Všechny kontroly prošly."}`);
 process.exit(chyby ? 1 : 0);

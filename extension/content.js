@@ -762,8 +762,22 @@
   /* Z media v knihovne udela predlohu promptu.
 
      Ve vyberu medii ma karta rovnou tlacitko "Add to Prompt"; v seznamu medii
-     je tataz volba schovana pod "More". Zkousime obe cesty. */
-  async function addToPrompt(img) {
+     je tataz volba schovana pod "More". Zkousime obe cesty.
+
+     Cerstve nahrana karta se jeste dorenderovava, takze prvni pokus obcas
+     tlacitko nenajde - zmereno naostro. Zkousime proto vickrat a obrazek si
+     pokazde najdeme znovu podle jmena media: React mezitim uzel vymeni a na
+     odpojeny by najeti mysi nemelo zadny ucinek. */
+  async function addToPrompt(jmenoMedia) {
+    for (let pokus = 0; pokus < 3; pokus++) {
+      if (pokus) await sleep(1200);
+      const img = libraryMedia().find((im) => mediaName(im.src) === jmenoMedia);
+      if (img && (await zkusPripojit(img))) return true;
+    }
+    return false;
+  }
+
+  async function zkusPripojit(img) {
     const karta = img.closest("div[class]")?.parentElement || img.parentElement;
 
     hover(img);
@@ -852,11 +866,16 @@
     // 2) z knihovny do promptu; za pripojenou se pocita jen ta, kterou pak
     //    opravdu vidime v pruhu - klik do nabidky sam o sobe nic nedokazuje
     let pripojeno = 0;
-    for (const img of nove().slice(0, paths.length)) {
-      // at se nam predloha nevrati mezi vysledky
-      zapamatujPredlohu(img);
+    // Jmena si opiseme dopredu - behem pripojovani Flow seznam prekresluje
+    // a puvodni uzly by se rozpadly pod rukama.
+    const jmena = nove().slice(0, paths.length).map((im) => {
+      zapamatujPredlohu(im);   // at se nam predloha nevrati mezi vysledky
+      return mediaName(im.src);
+    });
+
+    for (const jmeno of jmena) {
       const pred = refThumbs().length;
-      if (!(await addToPrompt(img))) {
+      if (!(await addToPrompt(jmeno))) {
         log("nabídka „Add to prompt“ se u předlohy neotevřela", "warn");
         continue;
       }

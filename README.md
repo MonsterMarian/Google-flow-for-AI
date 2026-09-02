@@ -364,12 +364,13 @@ prohlížeč ani přihlášení.
 cd tests && npm install && npm test
 ```
 
-Dvanáct scénářů: dávkování na 3×4, video a kredity, náhradní Enter,
+Čtrnáct scénářů: dávkování na 3×4, video a kredity, náhradní Enter,
 zablokované stahování, dopočet chybějících kusů, autopilot, rozbité Flow
-s diagnostikou — a pět na předlohy: že je nese každá dávka, že se bez nich nic
+s diagnostikou — a sedm na předlohy: že je nese každá dávka, že se bez nich nic
 neodešle, že se cesty berou z můstku, že ty z panelu přežijí obnovení stránky
-a pak se z úložiště uklidí, a že se předloha připojí i tou druhou cestou
-(nabídkou `More`).
+a pak se z úložiště uklidí, že se předloha připojí i tou druhou cestou
+(nabídkou `More`), že se **nahraná předloha nevrátí mezi výsledky** a že
+připojení zvládne i kartu, která se dorenderuje se zpožděním.
 
 ---
 

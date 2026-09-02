@@ -182,8 +182,16 @@ export function postavFlow(opts = {}) {
         }
         document.body.appendChild(menu);
       });
-      karta.append(obal, ...(opts.jenNabidkaMore ? [more] : [primo, more]));
+      const ovladace = opts.jenNabidkaMore ? [more] : [primo, more];
       knihovna.appendChild(karta);
+      karta.appendChild(obal);
+      if (opts.kartaSeRenderujePozdeji) {
+        // naostro se cerstve nahrana karta chvili dorenderovava a prvni
+        // pokus o pripojeni tlacitko jeste nenajde
+        setTimeout(() => karta.append(...ovladace), 1600);
+      } else {
+        karta.append(...ovladace);
+      }
     }
   };
 
