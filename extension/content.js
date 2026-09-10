@@ -118,8 +118,14 @@
       state.settings = { ...DEFAULTS.settings, ...(got.flowbridge.settings || {}) };
     }
     state.settings.collapsed = false; // panel chceme mit vzdy rozbaleny
-    // ulohy, ktere zustaly viset po zavreni panelu, vratime do fronty
-    for (const j of state.jobs) if (j.status === "running") j.status = "queued";
+    // ulohy, ktere zustaly viset po zavreni panelu nebo selhaly, vratime do fronty
+    for (const j of state.jobs) {
+      if (j.status === "running" || j.status === "failed") {
+        j.status = "queued";
+        j.error = null;
+        j.attempts = 0;
+      }
+    }
   }
 
   /* Po znovunacteni rozsireni zustane stara kopie skriptu ve strance bezet,
