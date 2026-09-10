@@ -1489,7 +1489,16 @@
       if (!Array.isArray(res.jobs) || !res.jobs.length) return "empty";
       let added = 0;
       for (const j of res.jobs) {
-        if (state.jobs.some((x) => x.bridgeId === j.id)) continue;
+        const existing = state.jobs.find((x) => x.bridgeId === j.id);
+        if (existing) {
+          if (existing.status === "failed") {
+            existing.status = "queued";
+            existing.error = null;
+            existing.attempts = 0;
+            added++;
+          }
+          continue;
+        }
         state.jobs.push({
           id: nowId(),
           bridgeId: j.id,
@@ -1955,7 +1964,7 @@
         const got = (j.done || []).length + (j.progress ? ` +${j.progress}` : "");
         return `<div class="fb-job">
           <div class="fb-job-top">
-            <span class="fb-badge ${j.status}">${j.status}</span>
+            <span class="fb-badge ${j.status}" data-retry="${j.id}" ${j.status === "failed" ? "title='klikni pro opakování' style='cursor:pointer;'" : ""}>${j.status}</span>
             <span class="fb-prompt" title="${esc(j.prompt)}">${esc(j.prompt)}</span>
             <button class="fb-x" data-del="${j.id}" title="odebrat">×</button>
           </div>
@@ -1966,6 +1975,20 @@
         </div>`;
       })
       .join("");
+
+    panel.querySelectorAll("[data-retry]").forEach((b) => {
+      b.onclick = () => {
+        const j = state.jobs.find((x) => x.id === b.dataset.retry);
+        if (j && j.status === "failed") {
+          j.status = "queued";
+          j.error = null;
+          j.attempts = 0;
+          save();
+          render();
+          if (state.settings.autopilot && !state.running) start();
+        }
+      };
+    });
 
     panel.querySelectorAll("[data-del]").forEach((b) => {
       b.onclick = () => {
