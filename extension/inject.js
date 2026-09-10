@@ -48,12 +48,16 @@
 
   function isMediaUrl(s) {
     if (typeof s !== "string" || s.length < 16 || s.length > 3000) return false;
-    if (!s.startsWith("http")) return false;
     if (AVATAR.test(s)) return false;
+    if (s.startsWith("blob:")) return true;
+    if (!s.startsWith("http")) return false;
     return (
       /googleusercontent\.com/.test(s) ||
       /storage\.(googleapis|mtls\.cloud\.google)\.com/.test(s) ||
-      /\.(mp4|webm|png|jpe?g|webp)(\?|#|$)/i.test(s)
+      /gstatic\.com/.test(s) ||
+      /\.(mp4|webm|png|jpe?g|webp)(\?|#|$)/i.test(s) ||
+      s.includes("getMediaUrlRedirect") ||
+      s.includes("/media/")
     );
   }
 
@@ -77,6 +81,9 @@
     const walk = (node, key) => {
       if (nodes++ > MAX_NODES || node == null) return;
       if (typeof node === "string") {
+        if (node.startsWith("[") || node.startsWith("{")) {
+          try { walk(JSON.parse(node), key); } catch {}
+        }
         if (isMediaUrl(node) && !seen.has(node)) {
           seen.add(node);
           media.push({ url: node, isVideo: looksVideo(node, key) });
@@ -116,7 +123,29 @@
 
   function parseAndHarvest(text, name) {
     if (!text || text.length > MAX_BODY) return;
-    // tRPC umi vratit i vic radku (streamovana davka) - zkusime kazdy zvlast
+
+    // 1. Přímé vytažení URL pomocí regexu (funguje na batchexecute, tRPC i surový stream)
+    const media = [];
+    const seen = new Set();
+    const clean = text
+      .replace(/\\u003d/g, "=")
+      .replace(/\\u0026/g, "&")
+      .replace(/\\\//g, "/");
+
+    const re = /https?:\/\/[^\s"'<>\\]*(?:googleusercontent\.com|storage\.googleapis\.com|gstatic\.com)[^\s"'<>\\]*/g;
+    let m;
+    while ((m = re.exec(clean)) !== null) {
+      const u = m[0].replace(/[\\,;"]+$/, "");
+      if (isMediaUrl(u) && !seen.has(u)) {
+        seen.add(u);
+        media.push({ url: u, isVideo: looksVideo(u, name) });
+      }
+    }
+    if (media.length) {
+      send({ kind: "media", name, items: media });
+    }
+
+    // 2. Strukturované JSON parsování
     const chunks = text.startsWith("[") || text.startsWith("{")
       ? [text]
       : text.split("\n").filter((l) => l.trim().startsWith("{") || l.trim().startsWith("["));

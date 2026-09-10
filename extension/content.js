@@ -1054,17 +1054,36 @@
     return `${pripojeno} z ${paths.length} ks`;
   }
 
+  function isAnyMediaUrl(src) {
+    if (!src || typeof src !== "string" || src.length < 10) return false;
+    if (src.includes("googleusercontent.com/a/")) return false; // avatar
+    if (src.startsWith("data:")) return false;
+    if (src.startsWith("blob:")) return true;
+    if (/googleusercontent\.com|storage\.googleapis\.com|gstatic\.com/i.test(src)) return true;
+    if (/\.(png|jpe?g|webp|mp4|webm)(\?|#|$)/i.test(src)) return true;
+    if (src.includes("name=") || src.includes("media") || src.includes("batchexecute")) return true;
+    return false;
+  }
+
   /* Vsechna media, ktera ted stranka zna. Avatary vyhazujeme. */
   function mediaSnapshot() {
     const out = new Set();
-    for (const el of document.querySelectorAll("img, video")) {
-      const src = el.currentSrc || el.src || el.getAttribute("poster") || "";
-      if (!src || src.startsWith("blob:") || src.startsWith("data:")) continue;
-      if (src.includes("googleusercontent.com/a/")) continue;
-      const jeMedium = /googleusercontent\.com|storage\.googleapis\.com/.test(src)
-        || ((src.includes("/fx/api/trpc") || src.includes("/api/trpc")) && src.includes("name="));
-      if (!jeMedium) continue;
-      out.add(src);
+    for (const el of document.querySelectorAll("img, video, source, [style*='url']")) {
+      if (el.closest("#flowbridge-panel")) continue;
+      const candidates = [
+        el.currentSrc,
+        el.src,
+        el.getAttribute("poster"),
+        el.getAttribute("src"),
+        el.getAttribute("data-src")
+      ];
+      if (el.style && el.style.backgroundImage) {
+        const m = el.style.backgroundImage.match(/url\(['"]?(.*?)['"]?\)/);
+        if (m) candidates.push(m[1]);
+      }
+      for (const s of candidates) {
+        if (isAnyMediaUrl(s)) out.add(s);
+      }
     }
     return out;
   }
@@ -1085,10 +1104,10 @@
 
     const add = (url) => {
       if (found.includes(url)) return;
-      // predlohy jsme do projektu nahráli sami - nejsou to vysledky
       if (jePredloha(url)) return;
       found.push(url);
       lastChange = Date.now();
+      log(`nalezeno médium: ${url.slice(0, 50)}... (${found.length}/${expected})`);
     };
     const zeSite = () => mediaSince(od, wantVideo);
 
@@ -1097,20 +1116,19 @@
       if (!state.running) break;
 
       for (const url of zeSite()) add(url);
-      // Odposlech je presnejsi, ale kdyz mlci, bereme aspon to, co je videt.
-      if (!netReady || found.length < expected) {
-        for (const url of mediaSnapshot()) if (!beforeDom.has(url)) add(url);
+      for (const url of mediaSnapshot()) {
+        if (!beforeDom.has(url)) add(url);
       }
 
       if (onTick) onTick(found.length);
       if (found.length >= expected) {
         await sleep(1500);
-        for (const url of zeSite()) add(url); // dober, co dorazilo tesne potom
+        for (const url of zeSite()) add(url);
+        for (const url of mediaSnapshot()) if (!beforeDom.has(url)) add(url);
         return found;
       }
-      if (!isBusy() && Date.now() - lastChange > 25000 && found.length) return found;
-      // nic se negeneruje a minutu nic nepřibylo -> dávka propadla, nečekáme dál
-      if (!isBusy() && !found.length && Date.now() - started > 60000) break;
+      if (!isBusy() && Date.now() - lastChange > 20000 && found.length) return found;
+      if (!isBusy() && !found.length && Date.now() - started > 75000) break;
     }
     if (found.length) return found;
     throw new Error("Vypršel čas a nepřibylo žádné médium.");
@@ -1121,8 +1139,27 @@
   // -------------------------------------------------------------------------
 
   function fullSize(url) {
+    if (!url || typeof url !== "string") return url;
     if (!url.includes("googleusercontent.com")) return url;
     return url.split("=")[0] + "=d";
+  }
+
+  async function resolveUrlForDownload(url) {
+    if (!url || typeof url !== "string") return url;
+    if (url.startsWith("blob:")) {
+      try {
+        const resp = await fetch(url);
+        const b = await resp.blob();
+        return new Promise((resolve) => {
+          const reader = new FileReader();
+          reader.onloadend = () => resolve(reader.result);
+          reader.readAsDataURL(b);
+        });
+      } catch {
+        return url;
+      }
+    }
+    return fullSize(url);
   }
 
   function slug(text, max = 40) {
@@ -1146,8 +1183,9 @@
     `${safe(job.tag || "default")}/${safe(slug(job.prompt))}-${job.id}`;
 
   async function downloadOne(url, filename, job) {
+    const dlUrl = await resolveUrlForDownload(url);
     const res = await withTimeout(
-      chrome.runtime.sendMessage({ type: "download", url: fullSize(url), filename }),
+      chrome.runtime.sendMessage({ type: "download", url: dlUrl, filename }),
       200000,
       { ok: false, error: "stahování neodpovědělo" }
     );
@@ -1162,7 +1200,7 @@
         chrome.runtime.sendMessage({
           type: "uploadToBridge",
           bridgeUrl: state.settings.bridgeUrl,
-          url: fullSize(url),
+          url: dlUrl,
           tag: jobFolder(job),
           name: filename.split("/").pop(),
         }),
@@ -1176,6 +1214,26 @@
       throw new Error(`${res?.error || "stažení selhalo"} / můstek: ${up?.error || "?"}`);
     }
     throw new Error(res?.error || "stažení selhalo");
+  }
+
+  async function stahnoutVsechnaViditelna() {
+    const media = [...mediaSnapshot()];
+    if (!media.length) {
+      log("na stránce nebyla nalezena žádná média ke stažení", "warn");
+      return;
+    }
+    log(`stahuji ${media.length} médií nalezených na stránce...`);
+    const activeJob = state.jobs.find((j) => j.status === "running") || state.jobs[0] || {
+      id: "manual",
+      tag: "hero_slashunderscore",
+      prompt: "stazeno_ze_stranky",
+      kind: "image",
+      done: [],
+      count: media.length
+    };
+    await downloadAll(activeJob, media);
+    log(`dokončeno: uloženo ${activeJob.done.length} médií!`);
+    render();
   }
 
   async function downloadAll(job, urls) {
@@ -1776,6 +1834,9 @@
           <button class="fb-ghost" id="fb-auto" title="sám spustí frontu, jakmile přibude úloha">Autopilot: zap</button>
           <button class="fb-ghost" id="fb-dump" title="uloží stav stránky pro opravu selektorů">Diagnostika</button>
         </div>
+        <div class="fb-row" style="margin-top:6px">
+          <button class="fb-ghost" id="fb-dl-all" style="width:100%;font-weight:600;color:#38bdf8" title="Stáhne všechna vygenerovaná média zobrazená na stránce">⬇ Stáhnout ze stránky</button>
+        </div>
         <div class="fb-log" id="fb-log"></div>
       </div>`;
     ensurePanelInDom();
@@ -1833,6 +1894,8 @@
       log("sbírám diagnostiku...");
       await posliDump("ruční");
     };
+
+    panel.querySelector("#fb-dl-all").onclick = () => stahnoutVsechnaViditelna();
 
     panel.querySelector("#fb-bridge").onclick = async () => {
       state.settings.bridgeEnabled = !state.settings.bridgeEnabled;
