@@ -1177,7 +1177,7 @@
     }
   }
 
-  const naProjektu = () => location.pathname.includes("/fx/tools/flow/project/");
+  const naProjektu = () => !!editor() || location.pathname.includes("/project/") || location.href.includes("project");
 
   /* Bez otevreneho projektu neni kam psat prompt. Kdyz si projekt pamatujeme,
      prejdeme do nej sami - jinak by beh bez dozoru skoncil hned na zacatku. */
@@ -1314,8 +1314,8 @@
           failed: state.jobs.filter((j) => j.status === "failed").length,
           lastLog: state.log[0]?.msg || "",
           project: naProjektu(),
-          // Adresu projektu si mustek zapamatuje, aby ji znal dashboard i agenti.
-          projectUrl: naProjektu() ? location.href : null,
+          projectUrl: location.href,
+          editorFound: !!editor(),
           credits: creditBalance,
           // Ulohy, ktere prave drzime - mustek jim posune casovac, aby si je
           // po 45 minutach nevzal zpatky jako zaseknute.
@@ -1869,16 +1869,14 @@
       return true;
     }
     if (msg?.type === "togglePanel" && panel) {
-      if (panel.style.display === "none") {
-        panel.style.display = "flex";
-      } else if (state.settings.collapsed) {
-        state.settings.collapsed = false;
-        panel.classList.remove("fb-collapsed");
-        panel.querySelector("#fb-collapse").textContent = "–";
-        save();
-      } else {
-        panel.style.display = "none";
-      }
+      ensurePanelInDom();
+      panel.style.display = "flex";
+      panel.classList.remove("fb-hidden");
+      panel.classList.remove("fb-collapsed");
+      state.settings.collapsed = false;
+      const colBtn = panel.querySelector("#fb-collapse");
+      if (colBtn) colBtn.textContent = "–";
+      save();
     }
     if (msg?.type === "bridgeTick") bridgeTick(true);
     return false;
