@@ -184,11 +184,42 @@
   // -------------------------------------------------------------------------
 
   function editor() {
-    const candidates = document.querySelectorAll(
-      'div[role="textbox"][contenteditable="true"], div[contenteditable="true"], [contenteditable="true"], textarea'
+    // 1. Nejprve hledáme pole s placeholderem pro prompt (česky i anglicky)
+    const byPlaceholder = document.querySelector(
+      '[placeholder*="vytvořit" i], [placeholder*="Describe" i], [placeholder*="prompt" i], [aria-placeholder*="vytvořit" i], [aria-placeholder*="Describe" i], [data-placeholder*="vytvořit" i], [data-placeholder*="Describe" i]'
     );
-    const valid = [...candidates].filter((el) => !el.closest("#flowbridge-panel"));
-    return valid[valid.length - 1] || null;
+    if (byPlaceholder && !byPlaceholder.closest("#flowbridge-panel")) return byPlaceholder;
+
+    // 2. Hledáme v kontejneru, který obsahuje tlačítko modelu nebo Agent (Nano Banana / Veo / Imagen / Agent / x4)
+    const modelBtn = [...document.querySelectorAll("button")].find(
+      (b) => !b.closest("#flowbridge-panel") && /(Nano Banana|Veo|Imagen|Agent|x\d)/i.test(b.innerText || "")
+    );
+    if (modelBtn) {
+      let parent = modelBtn.parentElement;
+      for (let i = 0; i < 6 && parent; i++) {
+        const ed = parent.querySelector(
+          'div[role="textbox"], [contenteditable="true"], textarea, input[type="text"]'
+        );
+        if (ed && !ed.closest("#flowbridge-panel")) return ed;
+        parent = parent.parentElement;
+      }
+    }
+
+    // 3. Všechna kandidátní pole v dolní polovině obrazovky
+    const candidates = [...document.querySelectorAll(
+      'div[role="textbox"][contenteditable="true"], div[contenteditable="true"], [contenteditable="true"], textarea, input[type="text"]'
+    )].filter((el) => {
+      if (el.closest("#flowbridge-panel")) return false;
+      const r = el.getBoundingClientRect();
+      return r.width > 50 && r.height > 20 && r.top > window.innerHeight * 0.3;
+    });
+    if (candidates.length) return candidates[candidates.length - 1];
+
+    // 4. Fallback na jakékoliv validní pole mimo panel
+    const fallback = [...document.querySelectorAll(
+      'div[role="textbox"], [contenteditable="true"], textarea'
+    )].filter((el) => !el.closest("#flowbridge-panel"));
+    return fallback[fallback.length - 1] || null;
   }
 
   function bar() {
@@ -298,12 +329,20 @@
     return !!s && s.getAttribute("aria-disabled") !== "true" && !s.disabled;
   }
 
-  const editorText = (ed) =>
-    (ed.innerText || ed.textContent || "").replace(/​/g, "").trim();
+  const editorText = (ed) => {
+    if (!ed) return "";
+    const val = ed.value !== undefined ? ed.value : (ed.innerText || ed.textContent || "");
+    return String(val).replace(/[\u200B-\u200D\uFEFF]/g, "").trim();
+  };
 
   /* Bez kurzoru na konci by mazani po znaku zacalo uprostred textu. */
   function caretToEnd(ed) {
     try {
+      if (typeof ed.setSelectionRange === "function") {
+        const len = (ed.value || "").length;
+        ed.setSelectionRange(len, len);
+        return;
+      }
       const r = document.createRange();
       r.selectNodeContents(ed);
       r.collapse(false);
@@ -318,6 +357,10 @@
   function selectAllInEditor(ed) {
     try {
       ed.focus();
+      if (typeof ed.select === "function") {
+        ed.select();
+        return;
+      }
       const sel = window.getSelection();
       const r = document.createRange();
       r.selectNodeContents(ed);
@@ -328,16 +371,43 @@
 
   async function setPrompt(text) {
     const ed = editor();
-    if (!ed) throw new Error("Nenašel jsem pole pro prompt. Jsi na stránce projektu Flow?");
+    if (!ed) {
+      posliDump("nenašel se editor").catch(() => {});
+      throw new Error("Nenašel jsem pole pro prompt. Jsi na stránce projektu Flow?");
+    }
+
+    log(`nalezen editor: <${ed.tagName.toLowerCase()}> placeholder="${ed.getAttribute('placeholder') || ''}"`);
 
     for (let pokus = 1; pokus <= 4; pokus++) {
+      try { ed.scrollIntoView({ block: "center", inline: "center" }); } catch {}
+      realClick(ed);
       ed.focus();
+
+      // Klik na urovni hardwaru (Chrome debugger CDP), aby Chrome aktivoval kurzor a okno
+      const r = ed.getBoundingClientRect();
+      if (r.width > 0 && r.height > 0) {
+        await withTimeout(
+          chrome.runtime.sendMessage({
+            type: "trustedClick",
+            x: Math.round(r.left + Math.min(50, r.width / 2)),
+            y: Math.round(r.top + r.height / 2),
+          }),
+          3000,
+          { ok: false }
+        );
+      }
+      await sleep(150);
 
       // 1. Smazat původní obsah pole
       selectAllInEditor(ed);
       try {
         document.execCommand("delete", false, null);
       } catch {}
+
+      if (ed.value !== undefined) {
+        ed.value = "";
+        ed.dispatchEvent(new Event("input", { bubbles: true }));
+      }
 
       const kolik = Math.min(2000, editorText(ed).length + 20);
       if (kolik > 0) {
@@ -347,17 +417,27 @@
             inputType: "deleteContentBackward", bubbles: true, cancelable: true, composed: true }));
         }
       }
-      await sleep(150);
+      await sleep(100);
 
       // 2. Vložit text přes trustedType (hardwarový vstup přes Chrome debugger CDP)
       ed.focus();
-      await withTimeout(
+      const typeRes = await withTimeout(
         chrome.runtime.sendMessage({ type: "trustedType", text }),
         5000,
-        { ok: false }
+        { ok: false, error: "timeout" }
       );
+      if (!typeRes?.ok) {
+        log(`trustedType varování: ${typeRes?.error || "selhalo"}`, "warn");
+      }
 
-      // 3. Pokud v poli text ještě není, zkusíme execCommand insertText
+      // 3. Pokud jde o textarea nebo input, přiřadíme přímo hodnotu
+      if (ed.tagName === "TEXTAREA" || ed.tagName === "INPUT") {
+        ed.value = text;
+        ed.dispatchEvent(new Event("input", { bubbles: true }));
+        ed.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+
+      // 4. Pokud v poli text ještě není, zkusíme execCommand insertText
       if (!editorText(ed).includes(text.slice(0, 15))) {
         ed.focus();
         try {
@@ -365,25 +445,29 @@
         } catch {}
       }
 
-      // 4. Syntetické události pro aktualizaci reaktivity
+      // 5. Pokud stále nic a je to contenteditable, zapíšeme innerText
+      if (!editorText(ed).includes(text.slice(0, 15)) && ed.isContentEditable) {
+        ed.innerText = text;
+      }
+
+      // 6. Syntetické události pro aktualizaci stavu v Reactu
       ed.dispatchEvent(new InputEvent("beforeinput", {
         inputType: "insertText", data: text, bubbles: true, cancelable: true, composed: true }));
       ed.dispatchEvent(new InputEvent("input", {
         inputType: "insertText", data: text, bubbles: true, cancelable: true, composed: true }));
 
-      await sleep(550);
+      await sleep(400);
 
-      if (submitReady() || editorText(ed).length > 0) {
-        const got = editorText(ed);
-        if (got && !got.includes(text.slice(0, 20))) {
-          log("v poli je: " + got.slice(0, 40), "info");
-        }
-        return;
-      }
+      const got = editorText(ed);
+      const ready = submitReady();
+      log(`pole: text=${got ? `"${got.slice(0, 25)}..."` : "prázdné"}, odeslat=${ready ? "aktivní" : "neaktivní"}`);
+
+      if (ready || got.length > 0) return;
       await sleep(400);
     }
 
     if (editorText(ed).length > 0) return;
+    posliDump("setPrompt selhal").catch(() => {});
     throw new Error("Flow prompt nepřijal (odeslat zůstalo neaktivní).");
   }
 
