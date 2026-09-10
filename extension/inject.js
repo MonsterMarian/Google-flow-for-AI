@@ -145,6 +145,18 @@
       send({ kind: "media", name, items: media });
     }
 
+    const anyUrls = clean.match(/https?:\/\/[^\s"'<>\\]+/g) || [];
+    if (text.length > 50) {
+      send({
+        kind: "netDiag",
+        name,
+        len: text.length,
+        snippet: text.slice(0, 160).replace(/[\r\n\t]+/g, " "),
+        urlCount: anyUrls.length,
+        sampleUrls: anyUrls.slice(0, 3),
+      });
+    }
+
     // 2. Strukturované JSON parsování
     const chunks = text.startsWith("[") || text.startsWith("{")
       ? [text]

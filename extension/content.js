@@ -94,6 +94,8 @@
       }
     } else if (p.kind === "credits") {
       creditBalance = p.value;
+    } else if (p.kind === "netDiag") {
+      log(`síť [${p.name}] ${p.len} B, URLs: ${p.urlCount} (${p.sampleUrls.join(", ") || p.snippet})`);
     }
   });
 
@@ -1057,12 +1059,28 @@
   function isAnyMediaUrl(src) {
     if (!src || typeof src !== "string" || src.length < 10) return false;
     if (src.includes("googleusercontent.com/a/")) return false; // avatar
-    if (src.startsWith("data:")) return false;
-    if (src.startsWith("blob:")) return true;
+    if (src.startsWith("blob:") || src.startsWith("data:image/")) return true;
     if (/googleusercontent\.com|storage\.googleapis\.com|gstatic\.com/i.test(src)) return true;
     if (/\.(png|jpe?g|webp|mp4|webm)(\?|#|$)/i.test(src)) return true;
-    if (src.includes("name=") || src.includes("media") || src.includes("batchexecute")) return true;
+    if (src.includes("name=") || src.includes("media") || src.includes("batchexecute") || src.includes("flow")) return true;
     return false;
+  }
+
+  function inspectDom() {
+    const allImgs = [...document.querySelectorAll("img")].map((im) => {
+      const src = im.currentSrc || im.src || im.getAttribute("src") || "";
+      return src.slice(0, 80);
+    });
+    const allCanvases = [...document.querySelectorAll("canvas")].map((c) => `${c.width}x${c.height}`);
+    const allVideos = [...document.querySelectorAll("video")].map((v) => (v.currentSrc || v.src || v.poster || "").slice(0, 80));
+    const bgs = [];
+    for (const el of document.querySelectorAll("div, a, span")) {
+      if (el.closest("#flowbridge-panel")) continue;
+      const bg = el.style?.backgroundImage || "";
+      if (bg && bg !== "none" && bg.includes("url(")) bgs.push(bg.slice(0, 80));
+      if (bgs.length >= 3) break;
+    }
+    return `DOM: ${allImgs.length} img [${allImgs.slice(0, 2).join("; ")}], ${allCanvases.length} canvas [${allCanvases.join(",")}], ${allVideos.length} video, ${bgs.length} bgs`;
   }
 
   /* Vsechna media, ktera ted stranka zna. Avatary vyhazujeme. */
@@ -1075,7 +1093,7 @@
         el.src,
         el.getAttribute("poster"),
         el.getAttribute("src"),
-        el.getAttribute("data-src")
+        el.getAttribute("data-src"),
       ];
       if (el.style && el.style.backgroundImage) {
         const m = el.style.backgroundImage.match(/url\(['"]?(.*?)['"]?\)/);
@@ -1083,6 +1101,17 @@
       }
       for (const s of candidates) {
         if (isAnyMediaUrl(s)) out.add(s);
+      }
+    }
+    // Pokud v img nic neni, projdeme vsechny elementy s background-image
+    if (!out.size) {
+      for (const el of document.querySelectorAll("div, a, span, picture")) {
+        if (el.closest("#flowbridge-panel")) continue;
+        const bg = el.style?.backgroundImage || window.getComputedStyle(el).backgroundImage;
+        if (bg && bg !== "none") {
+          const m = bg.match(/url\(['"]?(.*?)['"]?\)/);
+          if (m && isAnyMediaUrl(m[1])) out.add(m[1]);
+        }
       }
     }
     return out;
@@ -2142,6 +2171,7 @@
     const activeJob = state.jobs.find((j) => j.status === "running") || state.jobs.find((j) => j.status === "queued");
     if (!activeJob) return;
     const allDom = [...mediaSnapshot()].filter((u) => !jePredloha(u));
+    log(`autoSync: nalezeno ${allDom.length} médií v DOM, v úloze hotovo: ${activeJob.done.length}/${activeJob.count}`);
     if (allDom.length > activeJob.done.length) {
       const needed = Math.min(activeJob.count - activeJob.done.length, allDom.length - activeJob.done.length);
       if (needed > 0) {
@@ -2186,6 +2216,8 @@
       save();
     }
     log(`panel připraven${netReady ? "" : " (odposlech sítě neběží - načti rozšíření znovu)"}`);
+    log(inspectDom());
+    log(`snapshot médií: ${mediaSnapshot().size}`);
 
     // Automaticke stazeni medii, ktera uz na strance lezi
     try {
