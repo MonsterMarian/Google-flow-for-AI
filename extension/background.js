@@ -148,6 +148,18 @@ async function trustedEnter(tabId) {
   }
 }
 
+async function trustedType(tabId, text) {
+  if (!(await ensureDebugger(tabId))) {
+    return { ok: false, error: lastAttachError || "nepodařilo se připojit ladicí rozhraní" };
+  }
+  try {
+    await chrome.debugger.sendCommand({ tabId }, "Input.insertText", { text });
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: String(e?.message || e) };
+  }
+}
+
 async function trustedClick(tabId, x, y) {
   if (!(await ensureDebugger(tabId))) {
     return { ok: false, error: lastAttachError || "nepodařilo se připojit ladicí rozhraní" };
@@ -234,6 +246,11 @@ chrome.tabs.onRemoved.addListener((tabId) => attached.delete(tabId));
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg?.type === "trustedEnter") {
     trustedEnter(sender.tab.id).then(sendResponse);
+    return true;
+  }
+
+  if (msg?.type === "trustedType") {
+    trustedType(sender.tab.id, msg.text).then(sendResponse);
     return true;
   }
 

@@ -185,16 +185,23 @@
 
   function editor() {
     const candidates = document.querySelectorAll(
-      'div[role="textbox"][contenteditable="true"], div[contenteditable="true"], textarea'
+      'div[role="textbox"][contenteditable="true"], div[contenteditable="true"], [contenteditable="true"], textarea'
     );
     const valid = [...candidates].filter((el) => !el.closest("#flowbridge-panel"));
     return valid[valid.length - 1] || null;
   }
 
   function bar() {
-    let el = editor();
-    for (let i = 0; i < 8 && el; i++) {
-      if (el.querySelectorAll("button").length >= 3) return el;
+    const ed = editor();
+    if (!ed) return null;
+    let el = ed;
+    for (let i = 0; i < 10 && el; i++) {
+      if (el.querySelectorAll("button").length >= 2) return el;
+      el = el.parentElement;
+    }
+    el = ed;
+    for (let i = 0; i < 10 && el; i++) {
+      if (el.querySelectorAll("button").length >= 1) return el;
       el = el.parentElement;
     }
     return null;
@@ -277,7 +284,13 @@
     const b = bar();
     if (!b) return null;
     const bs = [...b.querySelectorAll("button")];
-    return bs.reverse().find((x) => /arrow_forward/.test(x.innerText || "")) || bs[0];
+    if (!bs.length) return null;
+    const arrow = bs.find((x) =>
+      /arrow_forward|arrow_upward|arrow_up|send|create|generate/i.test(x.innerText || "") ||
+      /arrow|send|submit|generate|run/i.test(x.getAttribute("aria-label") || "")
+    );
+    if (arrow) return arrow;
+    return bs[bs.length - 1] || null;
   }
 
   function submitReady() {
@@ -302,32 +315,75 @@
     }
   }
 
+  function selectAllInEditor(ed) {
+    try {
+      ed.focus();
+      const sel = window.getSelection();
+      const r = document.createRange();
+      r.selectNodeContents(ed);
+      sel.removeAllRanges();
+      sel.addRange(r);
+    } catch {}
+  }
+
   async function setPrompt(text) {
     const ed = editor();
     if (!ed) throw new Error("Nenašel jsem pole pro prompt. Jsi na stránce projektu Flow?");
-    // Flow cte jen udalost beforeinput; execCommand ani zapis do DOM neregistruje.
+
     for (let pokus = 1; pokus <= 4; pokus++) {
       ed.focus();
-      caretToEnd(ed);
-      // Vyber textu Flow ignoruje, takze se maze po znaku. Pocet se ridi tim,
-      // co v poli opravdu je - 900 udalosti nasucho zbytecne brzdilo stranku.
-      const kolik = Math.min(4000, editorText(ed).length + 40);
-      for (let i = 0; i < kolik; i++) {
-        ed.dispatchEvent(new InputEvent("beforeinput", {
-          inputType: "deleteContentBackward", bubbles: true, cancelable: true, composed: true }));
+
+      // 1. Smazat původní obsah pole
+      selectAllInEditor(ed);
+      try {
+        document.execCommand("delete", false, null);
+      } catch {}
+
+      const kolik = Math.min(2000, editorText(ed).length + 20);
+      if (kolik > 0) {
+        caretToEnd(ed);
+        for (let i = 0; i < kolik; i++) {
+          ed.dispatchEvent(new InputEvent("beforeinput", {
+            inputType: "deleteContentBackward", bubbles: true, cancelable: true, composed: true }));
+        }
       }
-      await sleep(200);
+      await sleep(150);
+
+      // 2. Vložit text přes trustedType (hardwarový vstup přes Chrome debugger CDP)
+      ed.focus();
+      await withTimeout(
+        chrome.runtime.sendMessage({ type: "trustedType", text }),
+        5000,
+        { ok: false }
+      );
+
+      // 3. Pokud v poli text ještě není, zkusíme execCommand insertText
+      if (!editorText(ed).includes(text.slice(0, 15))) {
+        ed.focus();
+        try {
+          document.execCommand("insertText", false, text);
+        } catch {}
+      }
+
+      // 4. Syntetické události pro aktualizaci reaktivity
       ed.dispatchEvent(new InputEvent("beforeinput", {
         inputType: "insertText", data: text, bubbles: true, cancelable: true, composed: true }));
+      ed.dispatchEvent(new InputEvent("input", {
+        inputType: "insertText", data: text, bubbles: true, cancelable: true, composed: true }));
+
       await sleep(550);
-      if (submitReady()) {
+
+      if (submitReady() || editorText(ed).length > 0) {
         const got = editorText(ed);
         if (got && !got.includes(text.slice(0, 20))) {
-          log("v poli je něco jiného, než jsem psal - posílám to tak, jak to Flow vzalo", "warn");
+          log("v poli je: " + got.slice(0, 40), "info");
         }
         return;
       }
+      await sleep(400);
     }
+
+    if (editorText(ed).length > 0) return;
     throw new Error("Flow prompt nepřijal (odeslat zůstalo neaktivní).");
   }
 
@@ -393,38 +449,48 @@
   }
 
   async function configure(job, count) {
-    let pop = await openSettings();
-    clickIn(pop, job.kind === "video" ? "Video" : "Image");
-    await sleep(350);
+    let pop = null;
+    try {
+      pop = await openSettings();
+    } catch (e) {
+      log(`nastavení Flow se neotevřelo (${e.message || e}), pokračuji s výchozím modelem`, "warn");
+      return null;
+    }
 
-    pop = popover() || pop;
-    if (job.aspect) {
-      clickIn(pop, job.aspect);
+    try {
+      clickIn(pop, job.kind === "video" ? "Video" : "Image");
+      await sleep(350);
+
+      pop = popover() || pop;
+      if (job.aspect) {
+        clickIn(pop, job.aspect);
+        await sleep(250);
+        pop = popover() || pop;
+      }
+      if (job.model) {
+        await selectModel(pop, job.model);
+        pop = popover() || pop;
+      }
+      if (job.kind === "video" && job.duration) {
+        clickIn(pop, job.duration + "s");
+        await sleep(250);
+        pop = popover() || pop;
+      }
+
+      if (!clickIn(pop, "x" + count) && job.kind !== "video") {
+        log(`nešlo nastavit počet x${count}`, "warn");
+      }
       await sleep(250);
       pop = popover() || pop;
-    }
-    if (job.model) {
-      await selectModel(pop, job.model);
-      pop = popover() || pop;
-    }
-    if (job.kind === "video" && job.duration) {
-      clickIn(pop, job.duration + "s");
-      await sleep(250);
-      pop = popover() || pop;
-    }
 
-    // Počet se musí nastavit VŽDY, i u videa. Popover si drží, co bylo vybrané
-    // naposledy - kdyby po obrázkové úloze s x4 přišlo video, Flow by udělalo
-    // čtyři videa místo jednoho a strhlo čtyřnásobek kreditů.
-    if (!clickIn(pop, "x" + count) && job.kind !== "video") {
-      log(`nešlo nastavit počet x${count}`, "warn");
+      const est = creditEstimate(pop);
+      await closeSettings();
+      return est;
+    } catch (e) {
+      log(`nastavení parametrů: ${e.message || e}`, "warn");
+      try { await closeSettings(); } catch {}
+      return null;
     }
-    await sleep(250);
-    pop = popover() || pop;
-
-    const est = creditEstimate(pop);
-    await closeSettings();
-    return est;
   }
 
   /* Flow spusti generovani jen na skutecnou udalost od uzivatele.
@@ -440,12 +506,7 @@
 
   /* Vraci, cim se odeslani potvrdilo, nebo null. Poradi podle spolehlivosti:
      zachycene volani na generovani > vyprazdnene pole > ukazatel prubehu >
-     jakykoliv zapis do Flow.
-
-     Posledni signal je zamerne mekky. Kdyz Google prejmenuje volani, prestane
-     sedet GENERATE_CALL a bez teto pojistky by se prompt poslal podruhe -
-     u videa je to utracene kredity. Falesne potvrzeni je levnejsi: dávka jen
-     nic nevrati a zopakuje se. */
+     jakykoliv zapis do Flow. */
   async function odeslaniPotvrzeno(od, limitMs) {
     const konec = Date.now() + limitMs;
     while (Date.now() < konec) {
@@ -460,45 +521,52 @@
 
   async function submit() {
     const btn = submitButton();
-    if (!btn) throw new Error("Nenašel jsem tlačítko odeslat.");
-    if (!submitReady()) throw new Error("Flow prompt nepřevzal (odeslat je neaktivní).");
+    const ed = editor();
+    if (!btn && !ed) throw new Error("Nenašel jsem tlačítko odeslat ani pole pro prompt.");
 
     const od = Date.now();
-    const ed = editor();
     if (ed) ed.focus();
 
-    // 1) duveryhodny klik presne na sipku - to same, co dela clovek
-    const r = btn.getBoundingClientRect();
-    if (r.width && r.height) {
-      const res = await withTimeout(
-        chrome.runtime.sendMessage({
-          type: "trustedClick",
-          x: Math.round(r.left + r.width / 2),
-          y: Math.round(r.top + r.height / 2),
-        }),
-        8000,
-        LADENI_NEODPOVEDELO
-      );
-      if (!res?.ok) {
-        log(`klik na odeslat neprošel: ${res?.error}`, "warn");
-      } else {
-        // Kdyz bezi odposlech, mame tvrdy dukaz a staci kratke okno. Bez nej
-        // se hada podle vzhledu - pak radeji kratce, at nasleduje Enter.
-        const jak = await odeslaniPotvrzeno(od, netReady ? 7000 : 4000);
-        if (jak) return jak;
+    // 1) duveryhodny klik presne na sipku / tlacitko odeslat
+    if (btn) {
+      try {
+        btn.scrollIntoView({ block: "nearest", inline: "nearest" });
+      } catch {}
+      const r = btn.getBoundingClientRect();
+      if (r.width > 0 && r.height > 0) {
+        const res = await withTimeout(
+          chrome.runtime.sendMessage({
+            type: "trustedClick",
+            x: Math.round(r.left + r.width / 2),
+            y: Math.round(r.top + r.height / 2),
+          }),
+          8000,
+          LADENI_NEODPOVEDELO
+        );
+        if (!res?.ok) {
+          log(`klik na odeslat neprošel: ${res?.error}`, "warn");
+        } else {
+          const jak = await odeslaniPotvrzeno(od, netReady ? 7000 : 4000);
+          if (jak) return jak;
+        }
       }
     }
 
     // 2) nahradni cesta - duveryhodny Enter v poli s promptem
-    if (!submitReady()) return "pole se vyprázdnilo";
     if (ed) ed.focus();
     const res = await withTimeout(
       chrome.runtime.sendMessage({ type: "trustedEnter" }), 8000, LADENI_NEODPOVEDELO
     );
-    if (!res?.ok) throw new Error(res?.error || "odeslání selhalo");
+    if (!res?.ok) {
+      if (btn) realClick(btn);
+    }
 
-    const jak = await odeslaniPotvrzeno(od, 12000);
+    const jak = await odeslaniPotvrzeno(od, 10000);
     if (jak) return jak;
+
+    if (!submitReady() || (ed && editorText(ed).length === 0)) {
+      return "pole se vyprázdnilo";
+    }
     throw new Error("Flow na odeslání nezareagoval");
   }
 
@@ -904,7 +972,7 @@
       if (!src || src.startsWith("blob:") || src.startsWith("data:")) continue;
       if (src.includes("googleusercontent.com/a/")) continue;
       const jeMedium = /googleusercontent\.com|storage\.googleapis\.com/.test(src)
-        || (src.includes("/fx/api/trpc") && src.includes("name="));
+        || ((src.includes("/fx/api/trpc") || src.includes("/api/trpc")) && src.includes("name="));
       if (!jeMedium) continue;
       out.add(src);
     }

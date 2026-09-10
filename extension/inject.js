@@ -20,7 +20,7 @@
   if (window.__fbNetHooked) return;
   window.__fbNetHooked = true;
 
-  const TRPC = /\/fx\/api\/trpc/;
+  const TRPC = /(\/fx)?\/api\/trpc|\/batch|\/generateMedia/i;
   const MAX_BODY = 6 * 1024 * 1024; // vetsi odpoved nema smysl rozebirat
   const MAX_NODES = 40000;          // pojistka proti obrimu JSON
 
