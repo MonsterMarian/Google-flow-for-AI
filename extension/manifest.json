@@ -9,7 +9,9 @@
     "downloads",
     "scripting",
     "debugger",
-    "unlimitedStorage"
+    "unlimitedStorage",
+    "activeTab",
+    "tabs"
   ],
   "host_permissions": [
     "https://labs.google/*",

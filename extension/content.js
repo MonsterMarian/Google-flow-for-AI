@@ -117,6 +117,7 @@
       state = { ...structuredClone(DEFAULTS), ...got.flowbridge };
       state.settings = { ...DEFAULTS.settings, ...(got.flowbridge.settings || {}) };
     }
+    state.settings.collapsed = false; // panel chceme mit vzdy rozbaleny
     // ulohy, ktere zustaly viset po zavreni panelu, vratime do fronty
     for (const j of state.jobs) if (j.status === "running") j.status = "queued";
   }
@@ -183,8 +184,11 @@
   // -------------------------------------------------------------------------
 
   function editor() {
-    const eds = document.querySelectorAll('div[role="textbox"][contenteditable="true"]');
-    return eds[eds.length - 1] || null;
+    const candidates = document.querySelectorAll(
+      'div[role="textbox"][contenteditable="true"], div[contenteditable="true"], textarea'
+    );
+    const valid = [...candidates].filter((el) => !el.closest("#flowbridge-panel"));
+    return valid[valid.length - 1] || null;
   }
 
   function bar() {
@@ -1213,18 +1217,7 @@
         await sleep(1000);
       }
 
-      state.recovery = (state.recovery || 0) + 1;
-      save();
-      if (state.recovery <= 3) {
-        log(`Flow nenaběhl${strankaSpadla() ? " (spadl na chybě)" : ""}, `
-          + `obnovuji stránku (${state.recovery}/3)`, "warn");
-        setTimeout(() => location.reload(), 2000);
-      } else {
-        log("Flow se nepodařilo rozběhnout ani po třech obnoveních - zastavuji", "error");
-        state.running = false;
-        save();
-        render();
-      }
+      log("Čekám na pole pro zadání promptu ve Flow...", "warn");
       return false;
     }
 
@@ -1532,6 +1525,14 @@
 
   let panel = null;
 
+  function ensurePanelInDom() {
+    if (!panel) return;
+    const target = document.body || document.documentElement;
+    if (target && !target.contains(panel)) {
+      target.appendChild(panel);
+    }
+  }
+
   function buildPanel() {
     panel = document.createElement("div");
     panel.id = "flowbridge-panel";
@@ -1610,7 +1611,7 @@
         </div>
         <div class="fb-log" id="fb-log"></div>
       </div>`;
-    document.body.appendChild(panel);
+    ensurePanelInDom();
 
     panel.querySelector("#fb-collapse").onclick = () => {
       state.settings.collapsed = !state.settings.collapsed;
@@ -1684,7 +1685,10 @@
     };
 
     makeDraggable(panel, panel.querySelector(".fb-head"));
-    panel.classList.toggle("fb-collapsed", !!state.settings.collapsed);
+    if (state.settings.collapsed) {
+      panel.classList.add("fb-collapsed");
+      panel.querySelector("#fb-collapse").textContent = "+";
+    }
   }
 
   /* Predlohy vybrane v panelu. Data URL se do stavu nedavaji - stav se uklada
@@ -1865,7 +1869,16 @@
       return true;
     }
     if (msg?.type === "togglePanel" && panel) {
-      panel.style.display = panel.style.display === "none" ? "flex" : "none";
+      if (panel.style.display === "none") {
+        panel.style.display = "flex";
+      } else if (state.settings.collapsed) {
+        state.settings.collapsed = false;
+        panel.classList.remove("fb-collapsed");
+        panel.querySelector("#fb-collapse").textContent = "–";
+        save();
+      } else {
+        panel.style.display = "none";
+      }
     }
     if (msg?.type === "bridgeTick") bridgeTick(true);
     return false;
@@ -1878,7 +1891,18 @@
     if (document.documentElement.getAttribute("data-fb-net") === "1") netReady = true;
 
     buildPanel();
+    ensurePanelInDom();
     render();
+
+    // Pojistka proti odstraneni panelu Reactem/Next.js pri nacteni stranky
+    try {
+      const obs = new MutationObserver(() => ensurePanelInDom());
+      const root = document.body || document.documentElement;
+      if (root) obs.observe(root, { childList: true });
+      setInterval(ensurePanelInDom, 1000);
+    } catch {
+      /* nevadi */
+    }
     // po restartu prohlizece muzou v ulozisti zbyt predlohy uloh, ktere uz
     // nikde nejsou
     uklidPredlohy();

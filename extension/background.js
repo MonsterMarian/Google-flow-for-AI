@@ -46,7 +46,9 @@ chrome.runtime.onInstalled.addListener(injectEverywhere);
 chrome.runtime.onStartup.addListener(injectEverywhere);
 
 chrome.action.onClicked.addListener(async (tab) => {
-  if (tab?.url?.includes("labs.google/fx/tools/flow")) {
+  const isFlow = (url) => typeof url === "string" && url.includes("labs.google/fx/tools/flow");
+
+  if (isFlow(tab?.url)) {
     const ok = await ensureInjected(tab.id);
     if (!ok) return;
     try {
@@ -54,9 +56,29 @@ chrome.action.onClicked.addListener(async (tab) => {
     } catch {
       /* panel se prave vlozil a je videt - nic dalsiho netreba */
     }
-  } else {
-    chrome.tabs.create({ url: "https://labs.google/fx/tools/flow" });
+    return;
   }
+
+  // Kdyz uzivatel klikne odjinud, prepneme na existujici kartu Flow misto otevirani nove
+  try {
+    const existing = await chrome.tabs.query({ url: FLOW_MATCH });
+    if (existing.length > 0) {
+      const target = existing[0];
+      await chrome.tabs.update(target.id, { active: true });
+      if (target.windowId) await chrome.windows.update(target.windowId, { focused: true }).catch(() => {});
+      await ensureInjected(target.id);
+      try {
+        await chrome.tabs.sendMessage(target.id, { type: "togglePanel" });
+      } catch {
+        /* nevadi */
+      }
+      return;
+    }
+  } catch {
+    /* fallback na vytvoreni zalozky */
+  }
+
+  chrome.tabs.create({ url: "https://labs.google/fx/tools/flow" });
 });
 
 /* ---------------------------------------------------------------------------
