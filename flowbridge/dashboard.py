@@ -23,7 +23,7 @@ app = FastAPI(title="FlowBridge", docs_url=None, redoc_url=None)
 # Stránka Flow posílá hotová média přímo sem, takže potřebuje povolený původ.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://labs.google"],
+    allow_origins=["https://labs.google", "https://flow.google.com"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -401,7 +401,7 @@ async def ext_heartbeat(request: Request) -> dict[str, Any]:
     # Projekt se nemusi nikam opisovat - rozsireni rekne, ktery ma otevreny.
     from . import state
     url = payload.get("projectUrl")
-    if isinstance(url, str) and url.startswith("https://labs.google/") and url != state.project_url():
+    if isinstance(url, str) and (url.startswith("https://labs.google/") or url.startswith("https://flow.google.com/")) and url != state.project_url():
         state.set_project_url(url)
         db.log(f"projekt převzat z prohlížeče: {url}")
 

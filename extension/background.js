@@ -8,7 +8,8 @@
  *      pridavat i AI agenti pres MCP.
  */
 
-const FLOW_MATCH = "https://labs.google/fx/tools/flow*";
+const FLOW_MATCH = "*://*.google.com/*";
+const isFlow = (url) => typeof url === "string" && (url.includes("labs.google/fx/tools/flow") || url.includes("flow.google.com"));
 
 /* Content script se sam vlozi jen do stranek nactenych po instalaci.
    Do uz otevrenych zalozek ho musime dostat rucne. */
@@ -35,8 +36,10 @@ async function ensureInjected(tabId) {
 
 async function injectEverywhere() {
   try {
-    const tabs = await chrome.tabs.query({ url: FLOW_MATCH });
-    for (const t of tabs) await ensureInjected(t.id);
+    const tabs = await chrome.tabs.query({});
+    for (const t of tabs) {
+      if (isFlow(t.url)) await ensureInjected(t.id);
+    }
   } catch {
     /* zadne zalozky s Flow - nic k reseni */
   }
@@ -46,8 +49,6 @@ chrome.runtime.onInstalled.addListener(injectEverywhere);
 chrome.runtime.onStartup.addListener(injectEverywhere);
 
 chrome.action.onClicked.addListener(async (tab) => {
-  const isFlow = (url) => typeof url === "string" && url.includes("labs.google/fx/tools/flow");
-
   if (isFlow(tab?.url)) {
     const ok = await ensureInjected(tab.id);
     if (!ok) return;
