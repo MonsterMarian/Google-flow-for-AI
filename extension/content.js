@@ -1357,10 +1357,22 @@
       }
       job.progress = 0;
 
+      // Pokud waitForNewMedia nic nenasel, zkusime vsechna cerstva media na strance
+      if (!urls.length) {
+        const allDom = [...mediaSnapshot()].filter((u) => !jePredloha(u));
+        if (allDom.length > job.done.length) {
+          const fresh = allDom.slice(job.done.length, job.done.length + submitted);
+          if (fresh.length) {
+            log(`automaticky zachyceno ${fresh.length} vygenerovaných médií ze stránky`);
+            urls = fresh;
+          }
+        }
+      }
+
       if (urls.length) {
         prazdnychVln = 0;
         await downloadAll(job, urls.slice(0, submitted));
-        log(`uloženo ${job.done.length}/${job.count}`);
+        log(`automaticky uloženo ${job.done.length}/${job.count}`);
       } else {
         prazdnychVln++;
       }
@@ -2126,6 +2138,27 @@
     return false;
   });
 
+  async function autoSyncMedia() {
+    const activeJob = state.jobs.find((j) => j.status === "running") || state.jobs.find((j) => j.status === "queued");
+    if (!activeJob) return;
+    const allDom = [...mediaSnapshot()].filter((u) => !jePredloha(u));
+    if (allDom.length > activeJob.done.length) {
+      const needed = Math.min(activeJob.count - activeJob.done.length, allDom.length - activeJob.done.length);
+      if (needed > 0) {
+        const toDl = allDom.slice(activeJob.done.length, activeJob.done.length + needed);
+        log(`automatické stahování ${toDl.length} již vygenerovaných médií ze stránky...`);
+        await downloadAll(activeJob, toDl);
+        log(`uloženo ${activeJob.done.length}/${activeJob.count}`);
+        if (activeJob.done.length >= activeJob.count) {
+          activeJob.status = "done";
+          save();
+          render();
+          pushToBridge(activeJob);
+        }
+      }
+    }
+  }
+
   (async function init() {
     await load();
     // inject.js bezi uz od document_start, takze jeho ohlaseni jsme nemohli
@@ -2153,6 +2186,11 @@
       save();
     }
     log(`panel připraven${netReady ? "" : " (odposlech sítě neběží - načti rozšíření znovu)"}`);
+
+    // Automaticke stazeni medii, ktera uz na strance lezi
+    try {
+      await autoSyncMedia();
+    } catch {}
 
     // mustek se pta na ulohy nezavisle na tom, jestli fronta zrovna bezi
     setInterval(() => {
