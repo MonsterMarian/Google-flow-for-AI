@@ -762,9 +762,11 @@
 
   /* Adresa, pod kterou Flow servíruje knihovní média. Nahledy pripojenych
      predloh vypadaji stejne - proto se poznavaji podle mista, ne podle URL. */
-  const MEDIA_URL = /media\.getMediaUrlRedirect|googleusercontent\.com|storage\.googleapis\.com/;
+  const MEDIA_URL = /media\.getMediaUrlRedirect|googleusercontent\.com|storage\.googleapis\.com|flow\.google\.com\/asb\/|flow-content\.google\//;
 
   const mediaName = (src) => (String(src).match(/[?&]name=([^&]+)/) || [])[1] || null;
+  // Nove Flow (10/2026) jmeno v URL nema - tez medium ma ale vsude stejnou URL.
+  const klicMedia = (im) => mediaName(im.currentSrc || im.src) || im.currentSrc || im.src;
 
   /* Nahrana predloha je pro Flow taky nove medium. Bez teto pamatovaci
      mnoziny by ji cekani na vysledky sebralo misto vygenerovaneho obrazku -
@@ -823,8 +825,8 @@
       if (im.closest("#flowbridge-panel")) continue;
       if (b && b.contains(im)) continue;
       if (!MEDIA_URL.test(src)) continue;
-      if (/googleusercontent\.com\/a\//.test(src)) continue;   // avatar
-      const klic = mediaName(src) || src;
+      if (/googleusercontent\.com\/(a|ogw)\//.test(src)) continue;   // avatar
+      const klic = klicMedia(im);
       if (videne.has(klic)) continue;
       videne.add(klic);
       out.push(im);
@@ -838,6 +840,14 @@
      Odkazy v levem panelu (Uploads / All Media) na to nestaci. */
   const vyberOtevren = () => !!najdiPodleTextu(/upload media/i);
 
+  /* Tlacitko, ktere vyber otvira. Flow ho uz prejmenovalo dvakrat; od 10/2026
+     je to jen ikona "+" s aria-label "Add ingredients to the prompt box". */
+  const otviracVyberu = () =>
+    najdiPodleTextu(/^add_2 Create$/)
+    || najdiPodleTextu(/^add Add Media$/)
+    || document.querySelector('button[aria-label*="to the prompt" i]')
+    || [...(bar()?.querySelectorAll("button") || [])].find((b) => norm(b) === "add");
+
   /* Otevreny vyber medii prekryva ovladaci pruh, takze by se pak neodeslalo.
      Po pripojeni predloh se proto musi zase zavrit. */
   async function closeLibrary() {
@@ -845,7 +855,7 @@
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     await sleep(500);
     if (vyberOtevren()) {
-      const create = najdiPodleTextu(/^add_2 Create$/);
+      const create = otviracVyberu();
       if (create) realClick(create);
       await pockej(() => !vyberOtevren(), 4000, 300);
     }
@@ -855,8 +865,7 @@
     // Cerstve nactene Flow prvni klik obcas spolkne, tak to zkusime vickrat.
     // Uz otevreny vyber ale znovu neotvirame - druhy klik ho zavre.
     for (let pokus = 0; pokus < 3 && !vyberOtevren(); pokus++) {
-      const otvirac = najdiPodleTextu(/^add_2 Create$/)
-        || najdiPodleTextu(/^add Add Media$/);
+      const otvirac = otviracVyberu();
       if (!otvirac) return false;
       realClick(otvirac);
       // Flow si vyber vykresluje se zpozdenim; par set milisekund nestaci.
@@ -935,13 +944,35 @@
   async function addToPrompt(jmenoMedia) {
     for (let pokus = 0; pokus < 3; pokus++) {
       if (pokus) await sleep(1200);
-      const img = libraryMedia().find((im) => mediaName(im.src) === jmenoMedia);
+      const kand = libraryMedia().filter((im) => klicMedia(im) === jmenoMedia);
+      const img = kand.find((im) => im.closest("button.asset-item")) || kand[0];
       if (img && (await zkusPripojit(img))) return true;
     }
     return false;
   }
 
   async function zkusPripojit(img) {
+    // 0) vyber medii Flow (Angular, 10/2026): klik na polozku otevre detail
+    //    s tlacitkem "Add to prompt". Po pridani se vyber sam zavre, takze
+    //    pro dalsi predlohu ho otevirame znovu.
+    //    libraryMedia() vraci jen prvni vyskyt (dlazdici v mrizce), polozku
+    //    ve vyberu si proto hledame primo podle stejne URL.
+    const klic = klicMedia(img);
+    const veVyberu = () => [...document.querySelectorAll("button.asset-item img")]
+      .find((im) => klicMedia(im) === klic)?.closest("button.asset-item");
+    let polozka = img.closest("button.asset-item") || veVyberu();
+    if (!polozka && (await openLibrary())) polozka = veVyberu();
+    if (polozka) {
+      realClick(polozka);
+      await sleep(600);
+      const btn = document.querySelector("button.detail-add-to-prompt-btn");
+      if (btn) {
+        realClick(btn);
+        await sleep(700);
+        return true;
+      }
+    }
+
     const karta = img.closest("div[class]")?.parentElement || img.parentElement;
 
     hover(img);
@@ -1001,27 +1032,28 @@
     if (!(await openLibrary())) {
       throw new Error("nepodařilo se otevřít výběr médií („Create“ v ovládacím pruhu)");
     }
-    const predUploadem = new Set(libraryMedia().map((im) => mediaName(im.src) || im.src));
+    const predUploadem = new Set(libraryMedia().map(klicMedia));
 
-    // Ladici rozhrani na vlastnosti JS nedosahne, takze mu ten spravny vstup
-    // musime ukazat znackou v DOM.
-    const vstup = flowFileInput();
-    if (!vstup) throw new Error("nenašel jsem ve Flow vstup pro soubory");
-    vstup.setAttribute(CIL_ATRIBUT, "1");
+    const nove = () => libraryMedia()
+      .filter((im) => !predUploadem.has(klicMedia(im)));
+
+    // Flow (Angular, 10/2026) vstup vyrabi az klikem na "Upload media" -
+    // background.js klikne pres ladici rozhrani (jen tak Chrome dialog
+    // otevre), zachyti ho a soubor podstrci rovnou. Z jednoho dialogu Flow
+    // vezme jen jeden soubor, proto po jednom a vzdy pockat, az se objevi.
+    // (Stary vstup s Reactem - attachFiles - uz Flow nema.)
     let res;
-    try {
+    for (let i = 0; i < paths.length; i++) {
+      if (!(await openLibrary())) throw new Error("výběr médií se nepodařilo otevřít");
       res = await withTimeout(
-        chrome.runtime.sendMessage({ type: "attachFiles", paths }),
+        chrome.runtime.sendMessage({ type: "attachViaChooser", paths: [paths[i]] }),
         40000,
         { ok: false, error: "ladicí rozhraní neodpovědělo" }
       );
-    } finally {
-      vstup.removeAttribute(CIL_ATRIBUT);
+      if (!res?.ok) break;
+      await pockej(() => nove().length >= i + 1, 30000, 500);
     }
     if (!res?.ok) throw new Error(`předlohy se nepodařilo předat Flow: ${res?.error}`);
-
-    const nove = () => libraryMedia()
-      .filter((im) => !predUploadem.has(mediaName(im.src) || im.src));
     if (!(await pockej(() => nove().length >= paths.length, 90000))) {
       throw new Error(`nahrálo se jen ${nove().length} z ${paths.length} předloh`
         + (libraryMedia().length ? "" : " (knihovna médií se neotevřela)"));
@@ -1034,7 +1066,7 @@
     // a puvodni uzly by se rozpadly pod rukama.
     const jmena = nove().slice(0, paths.length).map((im) => {
       zapamatujPredlohu(im);   // at se nam predloha nevrati mezi vysledky
-      return mediaName(im.src);
+      return klicMedia(im);
     });
 
     for (const jmeno of jmena) {
@@ -1056,14 +1088,13 @@
     return `${pripojeno} z ${paths.length} ks`;
   }
 
+  /* Flow od 10/2026 servíruje vygenerovane vysledky jen z flow-content.google.
+     Vse ostatni (bannery, avatary, nahledy cizich projektu z batchexecute,
+     nahrane predlohy na flow.google.com/asb/) vystup neni - volnejsi vzor
+     stahoval i to. shortcut: jen tahle domena, rozsirit az Flow zmeni CDN. */
   function isAnyMediaUrl(src) {
-    if (!src || typeof src !== "string" || src.length < 10) return false;
-    if (src.includes("googleusercontent.com/a/")) return false; // avatar
-    if (src.startsWith("blob:") || src.startsWith("data:image/")) return true;
-    if (/googleusercontent\.com|storage\.googleapis\.com|gstatic\.com/i.test(src)) return true;
-    if (/\.(png|jpe?g|webp|mp4|webm)(\?|#|$)/i.test(src)) return true;
-    if (src.includes("name=") || src.includes("media") || src.includes("batchexecute") || src.includes("flow")) return true;
-    return false;
+    if (!src || typeof src !== "string") return false;
+    return /^https:\/\/flow-content\.google\/(image|video)\//.test(src) || src.startsWith("blob:");
   }
 
   function inspectDom() {
@@ -1144,8 +1175,11 @@
       await sleep(2000);
       if (!state.running) break;
 
-      for (const url of zeSite()) add(url);
-      for (const url of mediaSnapshot()) {
+      // Odposlech site vidi i media cizich projektu (seznam projektu chodi
+      // stejnym batchexecute), proto se bere jen to, co je i ve strance.
+      const domNow = mediaSnapshot();
+      for (const url of zeSite()) if (domNow.has(url) && !beforeDom.has(url)) add(url);
+      for (const url of domNow) {
         if (!beforeDom.has(url)) add(url);
       }
 
@@ -1717,7 +1751,7 @@
       predlohy: {
         vstupu: document.querySelectorAll('input[type="file"]').length,
         vstupSReactem: !!flowFileInput(),
-        tlacitkoCreate: !!najdiPodleTextu(/^add_2 Create$/),
+        tlacitkoCreate: !!otviracVyberu(),
         mediiVKnihovne: libraryMedia().length,
         nahleduVPruhu: refThumbs().length,
         // popisek, na kterem stoji druha faze
@@ -2148,6 +2182,14 @@
     window.postMessage({ __fbResult: "download", id, results }, "*");
   });
 
+  // Vyvoj: window.postMessage({ flowbridge: "reload" }) ze stranky Flow nacte
+  // rozsireni znovu (viz background.js) - bez klikani v chrome://extensions.
+  window.addEventListener("message", (e) => {
+    if (e.source === window && e.data?.flowbridge === "reload") {
+      chrome.runtime.sendMessage({ type: "reloadExtension" });
+    }
+  });
+
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg?.type === "ping") {
       sendResponse({ ok: true });
@@ -2164,11 +2206,23 @@
       save();
     }
     if (msg?.type === "bridgeTick") bridgeTick(true);
+    if (msg?.type === "clickUploadMedia") {
+      // Jen souradnice: klik musi udelat ladici rozhrani, syntetickemu
+      // kliknuti Chrome dialog na vyber souboru neotevre (user activation).
+      const el = najdiPodleTextu(/upload media/i);
+      if (!el) { sendResponse({ ok: false }); return true; }
+      el.scrollIntoView({ block: "nearest" });
+      const r = el.getBoundingClientRect();
+      sendResponse({ ok: true, x: r.left + r.width / 2, y: r.top + r.height / 2 });
+      return true;
+    }
     return false;
   });
 
   async function autoSyncMedia() {
-    const activeJob = state.jobs.find((j) => j.status === "running") || state.jobs.find((j) => j.status === "queued");
+    // Jen uloha prerusena uprostred generovani; cekajici uloze by se jinak
+    // pripsaly starsi vysledky, ktere uz na strance lezi.
+    const activeJob = state.jobs.find((j) => j.status === "running");
     if (!activeJob) return;
     const allDom = [...mediaSnapshot()].filter((u) => !jePredloha(u));
     log(`autoSync: nalezeno ${allDom.length} médií v DOM, v úloze hotovo: ${activeJob.done.length}/${activeJob.count}`);

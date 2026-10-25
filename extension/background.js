@@ -229,6 +229,50 @@ async function attachFiles(tabId, paths) {
   }
 }
 
+/* Flow od 10/2026 (Angular) zadny trvaly vstup na soubory nema - vyrabi ho az
+   klik na "Upload media" a hned otevira systemovy dialog. Ladici rozhrani umi
+   ten dialog zachytit (Page.setInterceptFileChooserDialog), vratit uzel vstupu
+   a podstrcit mu soubory, aniz by se dialog ukazal. Klik udela content.js. */
+async function attachViaChooser(tabId, paths) {
+  if (!Array.isArray(paths) || !paths.length) {
+    return { ok: false, error: "žádné cesty k předlohám" };
+  }
+  if (!(await ensureDebugger(tabId))) {
+    return { ok: false, error: lastAttachError || "nepodařilo se připojit ladicí rozhraní" };
+  }
+  const cmd = (m, p) => chrome.debugger.sendCommand({ tabId }, m, p);
+  try {
+    await cmd("Page.enable");
+    await cmd("DOM.enable");
+    await cmd("Page.setInterceptFileChooserDialog", { enabled: true });
+    const otevreno = new Promise((resolve, reject) => {
+      const t = setTimeout(() => {
+        chrome.debugger.onEvent.removeListener(on);
+        reject(new Error("Flow po kliknutí na „Upload media“ neotevřel výběr souboru"));
+      }, 15000);
+      function on(source, method, params) {
+        if (source.tabId !== tabId || method !== "Page.fileChooserOpened") return;
+        clearTimeout(t);
+        chrome.debugger.onEvent.removeListener(on);
+        resolve(params);
+      }
+      chrome.debugger.onEvent.addListener(on);
+    });
+    const klik = await chrome.tabs.sendMessage(tabId, { type: "clickUploadMedia" });
+    if (!klik?.ok) throw new Error("tlačítko „Upload media“ se nenašlo");
+    // Dialog Chrome otevre jen po duveryhodnem kliknuti (user activation).
+    const tc = await trustedClick(tabId, klik.x, klik.y);
+    if (!tc.ok) throw new Error(`klik na „Upload media“ neprošel: ${tc.error}`);
+    const { backendNodeId } = await otevreno;
+    await cmd("DOM.setFileInputFiles", { backendNodeId, files: paths });
+    return { ok: true, files: paths.length };
+  } catch (e) {
+    return { ok: false, error: String(e?.message || e) };
+  } finally {
+    cmd("Page.setInterceptFileChooserDialog", { enabled: false }).catch(() => {});
+  }
+}
+
 function releaseDebugger(tabId) {
   if (!attached.has(tabId)) return;
   attached.delete(tabId);
@@ -312,6 +356,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg?.type === "attachFiles") {
     attachFiles(sender.tab.id, msg.paths).then(sendResponse);
+    return true;
+  }
+
+  // Vyvoj: po uprave souboru rozsireni staci ze stranky Flow poslat
+  // window.postMessage({flowbridge: "reload"}) misto klikani v chrome://extensions.
+  if (msg?.type === "reloadExtension") {
+    chrome.runtime.reload();
+    return false;
+  }
+
+  if (msg?.type === "attachViaChooser") {
+    attachViaChooser(sender.tab.id, msg.paths).then(sendResponse);
     return true;
   }
 
