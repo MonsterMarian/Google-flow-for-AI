@@ -1094,7 +1094,22 @@
      stahoval i to. shortcut: jen tahle domena, rozsirit az Flow zmeni CDN. */
   function isAnyMediaUrl(src) {
     if (!src || typeof src !== "string") return false;
-    return /^https:\/\/flow-content\.google\/(image|video)\//.test(src) || src.startsWith("blob:");
+    return /^https:\/\/flow-content\.google\/(image|video)\//.test(src) || src.startsWith("blob:") || isAsb(src);
+  }
+
+  /* Od 31. 10. 2026 Flow v mřížce ukazuje hotové výsledky jako <img> z flow.google.com/asb/… (náhled 382 px,
+     plná velikost =s0), flow-content.google se objeví jen v síti. Bez tohohle rozšíření výsledek nenašlo,
+     po vypršení čekání úlohu zopakovalo a generovalo dokola. Nahrané předlohy jsou taky /asb/ – ty
+     odfiltruje jePredloha() a snímek mřížky před odesláním (beforeDom). */
+  function isAsb(src) {
+    return /^https:\/\/(flow\.google\.com|lh3\.googleusercontent\.com)\/asb\//.test(src);
+  }
+
+  /* /asb/ jen z hotové dlaždice: obrázek načtený a v dlaždici není ukazatel průběhu („42%“). */
+  function hotovaDlazdice(el) {
+    if (el.tagName !== "IMG" || !el.complete || !el.naturalWidth) return false;
+    const tile = el.parentElement?.parentElement;
+    return !/\b\d{1,3}%/.test(tile?.innerText || "");
   }
 
   function inspectDom() {
@@ -1131,7 +1146,7 @@
         if (m) candidates.push(m[1]);
       }
       for (const s of candidates) {
-        if (isAnyMediaUrl(s)) out.add(s);
+        if (isAnyMediaUrl(s) && (!isAsb(s) || hotovaDlazdice(el))) out.add(s);
       }
     }
     // Pokud v img nic neni, projdeme vsechny elementy s background-image
@@ -1203,6 +1218,7 @@
 
   function fullSize(url) {
     if (!url || typeof url !== "string") return url;
+    if (isAsb(url)) return url.replace(/=[^/]*$/, "") + "=s0";   // plná velikost (ověřeno: 896×1200 místo 382×512)
     if (!url.includes("googleusercontent.com")) return url;
     return url.split("=")[0] + "=d";
   }
