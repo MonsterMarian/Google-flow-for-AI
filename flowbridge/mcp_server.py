@@ -102,7 +102,8 @@ def flow_enqueue_image(
         prompt: Textovy popis obrazku.
         count: Kolik kusu vygenerovat, 1-12. Worker to sam rozdeli na davky po 4
             a posle je soucasne, takze 12 je nejrychlejsi volba.
-        model: Napr. "Nano Banana 2", "Nano Banana Pro". Vychozi z konfigurace.
+        model: "Nano Banana 2.1", "Nano Banana 2 Lite" nebo "Nano Banana Pro"
+            (stav Flow 11/2026). Vychozi = co je ve Flow zrovna nastavene.
         aspect: "16:9", "4:3", "1:1", "3:4" nebo "9:16".
         refs: Absolutni cesty k referencnim obrazkum (predlohám) na disku.
         tag: Nazev projektu - urcuje podslozku ve vystupech.
@@ -145,7 +146,8 @@ def flow_enqueue_video(
     Args:
         prompt: Popis videa.
         duration: Delka v sekundach (obvykle 4, 6, 8 nebo 10).
-        model: Napr. "Veo 3.1 Fast", "Omni Flash". Vychozi z konfigurace.
+        model: "Omni 1.2 Flash" nebo "Veo 3.1 - Lite" (stav Flow 11/2026; Omni 1.1,
+            Veo 3.1 - Fast a - Quality konci 5. 12.). Vychozi = co je ve Flow nastavene.
         aspect: "16:9" nebo "9:16".
         refs: Absolutni cesty k vychozim obrazkum (image-to-video).
         count: Kolik videi vygenerovat.

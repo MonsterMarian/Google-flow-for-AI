@@ -479,12 +479,50 @@
     throw new Error("Flow prompt nepřijal (odeslat zůstalo neaktivní).");
   }
 
+  /* Angular CDK zavira menu jen na Escape s keyCode, poslany na prvek s fokusem. */
+  function escape() {
+    (document.activeElement || document).dispatchEvent(new KeyboardEvent("keydown", {
+      key: "Escape", code: "Escape", keyCode: 27, which: 27, bubbles: true }));
+  }
+
+  /* Cip "🍌 Nano Banana 2.1 · 3:4 · x1" v pruhu. Tlacitko "tune" vedle nej NENI
+     nastaveni generovani - otevira panel "Agent settings", ktery zakryje pole pro prompt. */
+  function settingsChip(b) {
+    const btns = b ? [...b.querySelectorAll("button")] : [];
+    return btns.find((x) => x.getAttribute("aria-label") === "Settings trigger"
+                            && x.getBoundingClientRect().width > 0)
+      || btns.find((x) => /x\d/.test(x.innerText || ""));
+  }
+
+  /* Flow 11/2026: v rezimu Agent pruh schova cip s modelem a prompt dostane agent
+     misto generatoru; panel "Agent settings" navic zakryje pole pro prompt.
+     Pred kazdou davkou proto oboje vypneme. */
+  async function pripravPruh() {
+    for (const zpet of document.querySelectorAll('button[aria-label="Back"]')) {
+      if (zpet.closest("#flowbridge-panel") || !zpet.getBoundingClientRect().width) continue;
+      let p = zpet;
+      for (let i = 0; i < 4 && p; i++, p = p.parentElement) {
+        if (/Agent settings/i.test(p.innerText || "")) {
+          realClick(zpet);
+          await sleep(500);
+          log("zavřen panel Agent settings");
+          break;
+        }
+      }
+    }
+    const agent = [...document.querySelectorAll('button[aria-pressed="true"]')]
+      .find((x) => !x.closest("#flowbridge-panel") && (x.innerText || "").trim() === "Agent");
+    if (agent) {
+      realClick(agent);
+      await sleep(500);
+      log("vypnut režim Agent - prompt jde rovnou do generátoru");
+    }
+  }
+
   async function openSettings() {
     const b = bar();
     if (!b) throw new Error("Nenašel jsem ovládací pruh Flow.");
-    const btns = [...b.querySelectorAll("button")];
-    const setBtn =
-      btns.find((x) => /x\d/.test(x.innerText || "")) || btns[btns.length - 2];
+    const setBtn = settingsChip(b);
     if (!setBtn) throw new Error("Nenašel jsem tlačítko s nastavením.");
     realClick(setBtn);
     for (let i = 0; i < 24; i++) {
@@ -496,12 +534,10 @@
   }
 
   async function closeSettings() {
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    escape();
     await sleep(250);
     if (popover()) {
-      const b = bar();
-      const btns = b ? [...b.querySelectorAll("button")] : [];
-      const setBtn = btns.find((x) => /x\d/.test(x.innerText || ""));
+      const setBtn = settingsChip(bar());
       if (setBtn) realClick(setBtn);
       await sleep(250);
     }
@@ -517,6 +553,8 @@
 
   /* Rozbali seznam modelu kliknutim na aktualne vybrany model. */
   function openModelList(pop) {
+    const btn = pop.querySelector('[aria-label="Select model family"]');
+    if (btn) return realClick(btn);
     const re = /^(🍌\s*)?(Nano Banana|Veo|Omni|Imagen)/i;
     const hits = [];
     for (const el of pop.querySelectorAll(CLICKABLE + ",span,div")) {
@@ -528,14 +566,29 @@
     return realClick(hits[0].closest(CLICKABLE) || hits[0]);
   }
 
+  /* Flow nazvy meni ("Veo 3.1 Fast" -> "Veo 3.1 - Fast", "Nano Banana 2" -> "2.1"),
+     proto se porovnava jen kostra nazvu a stary nazev chyti nejkratsi novejsi varianta. */
+  const klicModelu = (s) =>
+    String(s).toLowerCase().replace(/arrow_drop_down/g, "").replace(/[^a-z0-9.]/g, "");
+
   async function selectModel(pop, name) {
     if (!name) return;
-    if ((pop.innerText || "").toLowerCase().includes(name.toLowerCase())) return;
+    const chci = klicModelu(name);
+    const vybrany = pop.querySelector('[aria-label="Select model family"]');
+    if (vybrany ? klicModelu(vybrany.innerText) === chci
+                : (pop.innerText || "").toLowerCase().includes(name.toLowerCase())) return;
     if (!openModelList(pop)) return; // seznam se nenasel - nechavame vychozi model
     await sleep(450);
-    const menu = popover() || document.body;
-    if (!clickIn(menu, name, false)) {
-      log(`model "${name}" se v nabídce nenašel, nechávám výchozí`, "warn");
+    const polozky = [...document.querySelectorAll('[role="menuitem"],[role="option"],[role="menuitemradio"]')]
+      .filter((el) => !el.closest("#flowbridge-panel"));
+    const shoda = polozky.find((el) => klicModelu(el.innerText) === chci)
+      || polozky.filter((el) => klicModelu(el.innerText).startsWith(chci))
+        .sort((a, b) => klicModelu(a.innerText).length - klicModelu(b.innerText).length)[0];
+    if (shoda) {
+      realClick(shoda);
+    } else if (!clickIn(popover() || document.body, name, false)) {
+      log(`model "${name}" ve Flow není (nabídka: ${polozky.map(norm).join(", ") || "?"}), nechávám výchozí`, "warn");
+      escape(); // jinak nabidka zustane otevrena a zakryje pruh
     }
     await sleep(350);
   }
@@ -615,6 +668,10 @@
     const btn = submitButton();
     const ed = editor();
     if (!btn && !ed) throw new Error("Nenašel jsem tlačítko odeslat ani pole pro prompt.");
+    // Neaktivni odeslat by nize vypadalo jako "pole se vyprázdnilo" = falesne potvrzeni.
+    if (!(await pockej(submitReady, 5000, 250))) {
+      throw new Error("Tlačítko odeslat je neaktivní - Flow prompt nepřijal.");
+    }
 
     const od = Date.now();
     if (ed) ed.focus();
@@ -1391,6 +1448,7 @@
       for (const size of wave) {
         if (!state.running) break;
         try {
+          await pripravPruh();
           await setPrompt(job.prompt);
           // Predlohy musi byt na miste driv, nez se cte odhad kreditu -
           // s pripojenym obrazkem stoji generovani jinak.
@@ -1435,18 +1493,6 @@
         log(`čekání skončilo bez výsledku: ${e.message || e}`, "warn");
       }
       job.progress = 0;
-
-      // Pokud waitForNewMedia nic nenasel, zkusime vsechna cerstva media na strance
-      if (!urls.length) {
-        const allDom = [...mediaSnapshot()].filter((u) => !jePredloha(u));
-        if (allDom.length > job.done.length) {
-          const fresh = allDom.slice(job.done.length, job.done.length + submitted);
-          if (fresh.length) {
-            log(`automaticky zachyceno ${fresh.length} vygenerovaných médií ze stránky`);
-            urls = fresh;
-          }
-        }
-      }
 
       if (urls.length) {
         prazdnychVln = 0;
@@ -1646,6 +1692,8 @@
       for (const j of res.jobs) {
         const existing = state.jobs.find((x) => x.bridgeId === j.id);
         if (existing) {
+          // Mustek ji vydal znovu = hlaseni "hotovo" se ztratilo (mustek tehdy nebezel).
+          if (existing.status === "done") pushToBridge(existing);
           if (existing.status === "failed") {
             existing.status = "queued";
             existing.error = null;
@@ -1895,7 +1943,7 @@
           </div>
         </div>
         <label>model (prázdné = co je zrovna nastavené)</label>
-        <input id="fb-model" placeholder="Nano Banana 2">
+        <input id="fb-model" placeholder="Nano Banana 2.1">
         <label>předlohy (obrázky do promptu)</label>
         <input id="fb-files" type="file" accept="image/*" multiple>
         <div class="fb-refs" id="fb-reflist"></div>

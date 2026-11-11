@@ -25,8 +25,8 @@ Vstup: `$ARGUMENTS`
 3. **Výběr šablon.** Přečti `prompt-library.md` (ve složce tohoto skillu). Vyber různorodé šablony
    (mix: sociální důkaz, srovnání, benefit, lifestyle, UGC). Preferuj ty, kde je v `Model notes`
    **nano-banana** „clean"/„preferred"; šablony slabé na drobný text vynech nebo zjednoduš (méně řádků).
-   `model` neposílej - jede výchozí Nano Banana. Přepnutí na `Nano Banana Pro` rozšíření
-   (11/2026) nezvládne a vrátí starý obrázek z projektu místo nového.
+   Modely Flow (11/2026): `Nano Banana 2.1` (výchozí, model neposílej), `Nano Banana 2 Lite`,
+   `Nano Banana Pro` - ten posílej u šablon s hodně textem/typografií.
 4. **Vyplnění.** Doplň proměnné šablony z briefu. Text v reklamě v jazyce webu značky, pokud
    uživatel neřekne jinak. Na konec **každého** promptu přidej tři bloky z `safety-suffixes.md`
    (`[NO PLATFORM CHROME]`, `[EDGE-SAFE]`, `[TEXT FIDELITY]`) - doslova, ne parafrázovat.
@@ -34,7 +34,7 @@ Vstup: `$ARGUMENTS`
    `3:2`, `5:4` → `4:3`; `21:9` → `16:9`. Začátek promptu („2:3 portrait…") uprav na skutečný poměr.
 6. **Fronta.** `flow_queue_status` - pokud worker neběží nebo prohlížeč nehlásí projekt, řekni to
    uživateli (spustit `python -m flowbridge dashboard`, otevřít projekt ve Flow). Pak
-   `flow_enqueue_many` - jedno volání na každý poměr stran, `kind="image"`,
+   `flow_enqueue_many` - jedno volání na každou kombinaci poměr stran × model, `kind="image"`,
    `count=2` (2 varianty na koncept), `refs` = fotky produktu, `tag="ads-<znacka>"`.
    Videa nikdy - stojí kredity.
 7. **Kontrola.** Průběžně `flow_job` na vrácená ID. Hotové obrázky si prohlédni (Read) a hlídej:

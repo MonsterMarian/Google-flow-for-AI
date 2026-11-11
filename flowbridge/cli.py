@@ -350,7 +350,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     def add_job_flags(sp: argparse.ArgumentParser) -> None:
         sp.add_argument("--kind", choices=["image", "video"], default="image")
-        sp.add_argument("--model", default=None, help="např. 'Nano Banana 2' nebo 'Veo 3.1 Fast'")
+        sp.add_argument("--model", default=None, help="např. 'Nano Banana 2.1', 'Nano Banana Pro' nebo 'Omni 1.2 Flash'")
         sp.add_argument("--count", type=int, default=None,
                         help="kolik kusů (obrázky až 12, výchozí 4; video výchozí 1)")
         sp.add_argument("--aspect", default=None, help="16:9 | 4:3 | 1:1 | 3:4 | 9:16")

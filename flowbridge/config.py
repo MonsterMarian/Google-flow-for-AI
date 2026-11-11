@@ -35,11 +35,11 @@ class Config:
 
     @property
     def default_image_model(self) -> str:
-        return self.raw.get("flow", {}).get("default_image_model", "Nano Banana 2")
+        return self.raw.get("flow", {}).get("default_image_model", "Nano Banana 2.1")
 
     @property
     def default_video_model(self) -> str:
-        return self.raw.get("flow", {}).get("default_video_model", "Veo 3.1 Fast")
+        return self.raw.get("flow", {}).get("default_video_model", "Omni 1.2 Flash")
 
     @property
     def default_aspect(self) -> str:

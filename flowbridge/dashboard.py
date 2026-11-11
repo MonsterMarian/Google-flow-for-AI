@@ -562,7 +562,7 @@ PAGE = """<!doctype html>
           <select id="f-duration"><option value="">–</option>
             <option>4</option><option>6</option><option>8</option><option>10</option></select></div>
       </div>
-      <label>model (prázdné = výchozí)</label><input id="f-model" list="models" placeholder="Nano Banana 2">
+      <label>model (prázdné = výchozí)</label><input id="f-model" list="models" placeholder="Nano Banana 2.1">
       <datalist id="models"></datalist>
       <label>tag / projekt</label><input id="f-tag" value="default">
       <label>předlohy – cesty k obrázkům na disku, po jedné na řádek</label>
